@@ -1,0 +1,14 @@
+{
+  "python": "3.12.15",
+  "packages": {
+    "lerobot": "0.6.2",
+    "torch": "2.11.0+cu128",
+    "torchvision": "0.26.0+cu128",
+    "dynamixel-sdk": "4.1.0",
+    "opencv-python-headless": "4.13.0.92",
+    "numpy": "2.2.6",
+    "pillow": "12.3.0",
+    "pyserial": "3.5",
+    "safetensors": "0.8.0"
+  }
+}

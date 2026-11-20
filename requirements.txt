@@ -1,0 +1,8 @@
+# Core dependencies for the offline examples and tests (Python 3.12).
+# ACT inference and training additionally require LeRobot.
+numpy>=2.0,<2.3
+opencv-python-headless>=4.9,<4.14
+Pillow>=10,<13
+torch>=2.7,<2.12
+pyserial>=3.5,<4
+dynamixel-sdk>=4,<5

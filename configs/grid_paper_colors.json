@@ -1,0 +1,148 @@
+{
+  "version": 1,
+  "camera_index": 1,
+  "frame_size": [
+    1280,
+    720
+  ],
+  "min_area": 650,
+  "max_area_fraction": 0.16,
+  "roi": null,
+  "plane": null,
+  "colors": {
+    "yellow": {
+      "name": "黄色",
+      "samples": [
+        {
+          "h": 28.000000000000004,
+          "s": 213.0,
+          "v": 245.0,
+          "h_tol": 12,
+          "s_tol": 90,
+          "v_tol": 150.0,
+          "lab": [
+            89.795,
+            -13.078,
+            83.531
+          ],
+          "bgr": [
+            40.0,
+            230.0,
+            245.0
+          ],
+          "method": "generic_paper_preview_prior",
+          "note": "Generic prototype only; not a measured paper sample"
+        }
+      ]
+    },
+    "red": {
+      "name": "红色",
+      "samples": [
+        {
+          "h": 2.0000000000000004,
+          "s": 214.0,
+          "v": 220.0,
+          "h_tol": 8,
+          "s_tol": 80,
+          "v_tol": 150.0,
+          "lab": [
+            48.462,
+            65.016,
+            48.875
+          ],
+          "bgr": [
+            35.0,
+            45.0,
+            220.0
+          ],
+          "method": "generic_paper_preview_prior",
+          "note": "Generic prototype only; not a measured paper sample"
+        }
+      ]
+    },
+    "blue": {
+      "name": "蓝色",
+      "samples": [
+        {
+          "h": 108.99999999999999,
+          "s": 203.0,
+          "v": 220.0,
+          "h_tol": 17,
+          "s_tol": 110,
+          "v_tol": 150.0,
+          "lab": [
+            47.968,
+            19.094,
+            -62.047
+          ],
+          "bgr": [
+            220.0,
+            110.0,
+            45.0
+          ],
+          "method": "generic_paper_preview_prior",
+          "note": "Generic prototype only; not a measured paper sample"
+        }
+      ]
+    },
+    "green": {
+      "name": "绿色",
+      "samples": [
+        {
+          "h": 62.0,
+          "s": 147.0,
+          "v": 165.0,
+          "h_tol": 22,
+          "s_tol": 120,
+          "v_tol": 150.0,
+          "lab": [
+            60.48,
+            -46.797,
+            38.047
+          ],
+          "bgr": [
+            75.0,
+            165.0,
+            70.0
+          ],
+          "method": "generic_paper_preview_prior",
+          "note": "Generic prototype only; not a measured paper sample"
+        }
+      ]
+    },
+    "pink": {
+      "name": "粉红色",
+      "samples": [
+        {
+          "h": 166.0,
+          "s": 78.0,
+          "v": 245.0,
+          "h_tol": 24,
+          "s_tol": 110,
+          "v_tol": 150.0,
+          "lab": [
+            77.533,
+            32.406,
+            -6.578
+          ],
+          "bgr": [
+            205.0,
+            170.0,
+            245.0
+          ],
+          "method": "generic_paper_preview_prior",
+          "note": "Generic prototype only; not a measured paper sample"
+        }
+      ]
+    }
+  },
+  "target_mode": "blocks",
+  "require_numbers": false,
+  "require_distinct_colors": false,
+  "min_area_fraction": 0.002,
+  "source_config": "configs/grid_paper_colors.json",
+  "fast_lookup": true,
+  "detection_max_side": 960,
+  "material": "paper",
+  "calibration_required": true
+}

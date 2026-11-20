@@ -1,0 +1,13 @@
+{
+  "version": 1,
+  "camera_source": "normal",
+  "camera_index": 1,
+  "material": "paper",
+  "model_path": "../outputs/digits/paper/best.pt",
+  "verifier_model_path": "../outputs/digits/mnist_cnn_v1/best.pt",
+  "color_config_path": "grid_paper_colors.json",
+  "material_profiles": {
+    "cube": "grid_blocks_colors.json",
+    "paper": "grid_paper_colors.json"
+  }
+}

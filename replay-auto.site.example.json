@@ -1,0 +1,15 @@
+{
+  "data": "datasets",
+  "quantity_rule": "parity",
+  "follower_port": "COM_PORT",
+  "follower_calibration": "calibration/koch_legacy/follower/my_follower.json",
+  "source": {
+    "camera": 0,
+    "config": "configs/autonomy_source.json"
+  },
+  "targets": {
+    "camera": 1,
+    "config": "configs/grid_runtime.json",
+    "rotation": 0
+  }
+}

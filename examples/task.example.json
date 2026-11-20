@@ -1,0 +1,14 @@
+{
+  "inventory": {
+    "S1": ["red", "blue"],
+    "S2": ["yellow", "green"],
+    "S3": ["blue"],
+    "S4": ["green"]
+  },
+  "targets": {
+    "T1": {"color": "red", "number": 1},
+    "T2": {"color": "blue", "number": 2},
+    "T3": {"color": "yellow", "number": 3},
+    "T4": {"color": "green", "number": 4}
+  }
+}
