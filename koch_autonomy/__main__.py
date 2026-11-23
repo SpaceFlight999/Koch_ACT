@@ -31,7 +31,7 @@ def load_target_reader(rotation=None, target=None, config_path=None, quantity_ru
 def camera_observe(args, *, on_view=None, cancelled=None):
     import cv2
     from camera_vision import read_image, write_image
-    from .vision import SourceReader, TargetStackReader, StableRead, rectify_marked_plane
+    from .vision import StableRead, load_stack_reader, mark_source, rectify_marked_plane
     alignment = None
     if getattr(args, 'alignment', None) is not None:
         from .camera_alignment import CameraAlignment, SOURCE_ADJUST_HINT
@@ -49,11 +49,6 @@ def camera_observe(args, *, on_view=None, cancelled=None):
             registered = alignment.register_source(frame, aligned)
             if registered is None:
                 marked = frame.copy()
-                for point in aligned['points']:
-                    goal = tuple(point['reference_xy'])
-                    cv2.drawMarker(marked, goal, (255, 215, 45), cv2.MARKER_CROSS, 25, 3)
-                    if point['current_xy'] is not None:
-                        cv2.arrowedLine(marked, tuple(point['current_xy']), goal, (35, 185, 255), 3)
                 hint = (SOURCE_ADJUST_HINT if alignment.source_bounds else
                         '请打开「全局相机对位」调整支架。')
                 return ({'complete': False, 'stable': False, 'alignment': aligned,
@@ -71,8 +66,10 @@ def camera_observe(args, *, on_view=None, cancelled=None):
                 raise ValueError('校正后 T 区有不可见部分，请调整取景。')
         elif plane and not (visible == 255).all():
             raise ValueError('校正画面有不可见边界，请用 --roi 限定完全可见的 T 区。')
-        result = reader.read(frame)
+        result = reader.read(frame, registered=True) if alignment is not None else reader.read(frame)
         report, marked = result if isinstance(result, tuple) else (result, frame)
+        if args.kind == 'source':
+            marked = mark_source(frame, report)
         report.update(input_roi=args.roi, marked_plane_registration=bool(plane))
         if alignment is not None:
             report['alignment'] = aligned
@@ -85,13 +82,7 @@ def camera_observe(args, *, on_view=None, cancelled=None):
             raise ValueError('堆栈使用八面标定中的区域，不能再用 --roi 改变像素坐标。')
         if not args.config:
             raise ValueError('堆栈识别需要 --config 指定当前视角的八面标定。')
-        config_path = Path(args.config).resolve()
-        config = read_json(config_path)
-        for key in ('color_config_path', 'empty_reference_image'):
-            if config.get(key):
-                config[key] = str(resolve_config_reference(config[key], config_path))
-        reader_type = SourceReader if args.kind == 'source' else TargetStackReader
-        reader = reader_type(config, read_json(config['color_config_path']))
+        reader = load_stack_reader(Path(args.config).resolve(), args.kind)
     if args.image:
         frame = read_image(args.image)
         report, marked = read_frame(frame)
@@ -115,7 +106,7 @@ def camera_observe(args, *, on_view=None, cancelled=None):
     try:
         if not capture.isOpened():
             raise ValueError(f'无法打开指定相机 {camera_index}。')
-        size = config['frame_size'] if args.kind != 'targets' else [1280, 720]
+        size = reader.config['frame_size'] if args.kind != 'targets' else [1280, 720]
         capture.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
         capture.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
         stable = StableRead()
@@ -278,7 +269,8 @@ def main(argv=None):
     p.add_argument('--output', type=Path, required=True)
     sub.add_parser('cameras')
     p = sub.add_parser('align-camera', help='显示全局相机参考点与实时偏移。')
-    p.add_argument('--profile', type=Path, default=ROOT / 'configs/replay_camera_alignment.json')
+    p.add_argument('--profile', type=Path)
+    p.add_argument('--site', type=Path, help='与 Replay 面板共用 S 区配置并核对八个层位。')
     p.add_argument('--output', type=Path, help='对齐后可保存当前原图和偏移报告。')
     p = sub.add_parser('replay-auto', help='自动识别、连续执行、结束时核对 S 区剩余库存。')
     p.add_argument('--site', type=Path, required=True, help='同伴电脑的相机、从臂和路径配置。')
@@ -323,8 +315,15 @@ def main(argv=None):
             from grid_reader.cameras import video_devices
             print(json.dumps([{'index': i, 'name': name} for i, name in enumerate(video_devices())], ensure_ascii=False, indent=2))
         elif args.command == 'align-camera':
-            from .camera_alignment import open_alignment
-            if not open_alignment(args.profile, args.output):
+            from .camera_alignment import DEFAULT_PROFILE, open_alignment
+            profile, source_config = args.profile, None
+            if args.site:
+                site_dir = args.site.resolve().parent
+                source = read_json(args.site)['source']
+                if profile is None and source.get('alignment'):
+                    profile = site_dir / source['alignment']
+                source_config = site_dir / source['config']
+            if not open_alignment(profile or DEFAULT_PROFILE, args.output, source_config=source_config):
                 parser.exit(1, '全局相机对位未确认。\n')
         elif args.command == 'replay-auto':
             from .replay_auto import run_auto

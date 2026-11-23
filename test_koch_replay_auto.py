@@ -369,8 +369,10 @@ class AutoReplayTests(unittest.TestCase):
         wide_report = alignment.measure(shifted_left)
         self.assertTrue(wide_report['source_ready'])
         json.dumps(wide_report, allow_nan=False)
-        too_far = cv2.warpAffine(frame, np.float32([[1, 0, 190], [0, 1, 0]]), alignment.size)
-        self.assertIsNone(alignment.register_source(too_far, alignment.measure(too_far)))
+        far = cv2.warpAffine(frame, np.float32([[1, 0, 310], [0, 1, 25]]), alignment.size)
+        self.assertIsNotNone(alignment.register_source(far, alignment.measure(far)))
+        cropped = cv2.warpAffine(frame, np.float32([[1, 0, 1000], [0, 1, 0]]), alignment.size)
+        self.assertIsNone(alignment.register_source(cropped, alignment.measure(cropped)))
         self.assertFalse(alignment.measure(np.zeros_like(frame))['source_ready'])
 
     @needs_alignment_reference
@@ -404,6 +406,41 @@ class AutoReplayTests(unittest.TestCase):
         self.assertTrue(report['complete'])
         self.assertEqual(report['inventory'], {'S1': ['blue', 'red'], 'S2': ['green', 'yellow'],
                                               'S3': ['red', 'pink'], 'S4': ['blue', 'pink']})
+
+    @needs_alignment_reference
+    def test_source_inventory_is_reacquired_after_camera_moves_across_frame(self):
+        from koch_autonomy.vision import load_stack_reader
+        paths = [FIELD_ROOT / 'outputs/koch_replay_auto' / run / 'source-before-raw.png'
+                 for run in ('20261123_171106_450302', '20261123_171223_485306')]
+        if not all(path.is_file() for path in paths):
+            self.skipTest('需要机位大幅移动前后的现场复现原图')
+        alignment = CameraAlignment(FIELD_PROFILE)
+        reader = load_stack_reader(FIELD_ROOT / 'configs/autonomy_source.json', 'source')
+        expected = {'S1': ['blue', 'red'], 'S2': ['pink', 'yellow'], 'S3': ['red', 'pink'], 'S4': ['blue', 'green']}
+        for path in paths:
+            frame = read_image(path)
+            for _ in range(4):
+                pose = alignment.measure(frame)
+                self.assertTrue(pose['source_ready'])
+                self.assertFalse(pose['aligned'])
+                report = reader.read(alignment.register_source(frame, pose))
+                self.assertTrue(report['complete'])
+                self.assertEqual(report['inventory'], expected)
+
+    @needs_alignment_reference
+    def test_rear_block_does_not_count_as_the_upper_layer_of_an_empty_front_slot(self):
+        from koch_autonomy.vision import load_stack_reader
+        path = FIELD_ROOT / 'outputs/koch_replay_auto/20261123_170532_735971_recovery_check/source-after-stop-raw.png'
+        if not path.is_file():
+            self.skipTest('需要前排空托座与后排方块投影重叠的现场原图')
+        alignment = CameraAlignment(FIELD_PROFILE)
+        frame = read_image(path)
+        registered = alignment.register_source(frame, alignment.measure(frame))
+        reader = load_stack_reader(FIELD_ROOT / 'configs/autonomy_source.json', 'source')
+        self.assertIn('S2_L2', reader.read(registered)['unknown'])
+        report = reader.read(registered, registered=True)
+        self.assertTrue(report['complete'])
+        self.assertEqual(report['inventory'], {'S1': ['blue', 'red'], 'S2': [], 'S3': ['red'], 'S4': ['blue']})
 
 
 if __name__ == '__main__':

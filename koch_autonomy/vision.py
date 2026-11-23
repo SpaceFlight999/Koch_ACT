@@ -10,7 +10,9 @@ import numpy as np
 from camera_vision import classify_sample, read_image
 from grid_reader.core import GridReader, annotate, warp_quad
 from handwritten_digits.camera import orient
+from koch_project_paths import resolve_config_reference
 from .planner import SLOTS, TARGETS, validate_targets
+from .reverse import read_json
 
 
 def corner_order(cells):
@@ -203,7 +205,7 @@ class StackReader:
             if list(self.empty.shape[1::-1]) != config['frame_size']:
                 raise ValueError('空场景参考分辨率与标定不一致。')
 
-    def read(self, frame):
+    def read(self, frame, *, registered=False):
         if list(frame.shape[1::-1]) != self.config['frame_size']:
             raise ValueError('全局相机分辨率变化，请重新标定。')
         view_verified = False
@@ -242,6 +244,13 @@ class StackReader:
                     inventory[slot].append(color)
                 faces.append({'id': name, 'state': state, 'color': color, 'lab_distance': distance,
                               'empty_difference': difference, 'quad_px': quad.tolist()})
+            if self.region == 'S' and registered and states == ['empty', 'unknown']:
+                # An empty lower seat cannot support an upper cube. The rear
+                # stack can project into this upper window when the front is empty.
+                states[1] = 'empty'
+                faces[-1].update(state='empty', inferred_from_lower=True)
+                unknown.pop()
+                inventory[slot].pop()
             if states[0] == 'empty' and states[1] != 'empty':
                 issues.append(f'{slot} 上层存在/不明但下层为空，层位或遮挡需复核。')
         complete = not unknown and not issues
@@ -269,6 +278,26 @@ class TargetStackReader(StackReader):
         if not config.get('empty_reference_image'):
             raise ValueError('T 放置后核验必须有当前空场景参考，不能用彩纸颜色冒充方块。')
         super().__init__(config, color_config, 'T')
+
+
+def load_stack_reader(config_path, kind):
+    config = read_json(config_path)
+    for key in ('color_config_path', 'empty_reference_image'):
+        if config.get(key):
+            config[key] = str(resolve_config_reference(config[key], config_path))
+    reader = SourceReader if kind == 'source' else TargetStackReader
+    return reader(config, read_json(config['color_config_path']))
+
+
+def mark_source(frame, report):
+    marked = frame.copy()
+    for face in report['faces']:
+        quad = np.rint(face['quad_px']).astype(np.int32)
+        color = {'occupied': (90, 245, 110), 'empty': (205, 195, 115), 'unknown': (0, 150, 255)}[face['state']]
+        cv2.polylines(marked, [quad], True, color, 2, cv2.LINE_AA)
+        x, y = quad[0]
+        cv2.putText(marked, face['id'], (x, y - 3), cv2.FONT_HERSHEY_SIMPLEX, .38, color, 1, cv2.LINE_AA)
+    return marked
 
 
 class StableRead:

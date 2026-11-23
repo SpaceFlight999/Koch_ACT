@@ -1,6 +1,6 @@
 @echo off
 setlocal
-set "profile=%~dp0configs\replay_camera_alignment.json"
-if not exist "%profile%" if exist "%~dp0..\configs\replay_camera_alignment.json" set "profile=%~dp0..\configs\replay_camera_alignment.json"
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Koch-Replay.ps1" align-camera --profile "%profile%" %*
+set "site=%~dp0replay-auto.site.json"
+if not exist "%site%" if exist "%~dp0..\replay-auto.site.json" set "site=%~dp0..\replay-auto.site.json"
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File "%~dp0Koch-Replay.ps1" align-camera --site "%site%" %*
 exit /b %errorlevel%

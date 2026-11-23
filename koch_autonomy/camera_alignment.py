@@ -1,4 +1,4 @@
-"""Compare the live global camera with fixed, named points in a reference frame."""
+"""Locate and register the global camera's S zone from its holder contours."""
 from hashlib import file_digest
 from itertools import combinations
 from pathlib import Path
@@ -24,6 +24,8 @@ SOURCE_GUIDED_SEARCH_RADIUS = 32
 REQUIRED_FRAMES = 4
 STABLE_SECONDS = 1.0
 SOURCE_ADJUST_HINT = '让四个 S 区托座和上层方块完整入画，避免夹爪遮住托座外沿。'
+LOCATOR_SCALE = .4
+HOLDER_SCALES = (.65, .72, .78, .83, .89, .95, 1., 1.06, 1.12, 1.2)
 
 
 def holder_edges(gray):
@@ -31,6 +33,10 @@ def holder_edges(gray):
     gx = cv2.Sobel(smooth, cv2.CV_32F, 1, 0)
     gy = cv2.Sobel(smooth, cv2.CV_32F, 0, 1)
     return np.minimum(90, cv2.magnitude(gx, gy))
+
+
+def small_edges(gray):
+    return holder_edges(cv2.resize(gray, None, fx=LOCATOR_SCALE, fy=LOCATOR_SCALE, interpolation=cv2.INTER_AREA))
 
 
 def fit_holder_surfaces(reference, current):
@@ -73,6 +79,8 @@ class CameraAlignment:
         stock_path = self.profile.get('stock_reference_image')
         self.uses_holder_surfaces = stock_path is not None
         self.holder_templates = []
+        self.holder_locator = []
+        self.source_seed = None
         if self.uses_holder_surfaces and not self.source_bounds:
             raise ValueError('托座轮廓定位需要 S 区画面范围。')
         if not 0 < self.tolerance <= 10:
@@ -86,6 +94,9 @@ class CameraAlignment:
                 raise ValueError('满载和空托座参考图必须同尺寸。')
             stock_gray = cv2.cvtColor(stock, cv2.COLOR_BGR2GRAY)
             empty_edges, stock_edges = holder_edges(gray), holder_edges(stock_gray)
+            regions = self.profile.get('holder_search_regions')
+            if regions:
+                self.build_holder_locator(regions, gray, stock_gray)
         for anchor in self.profile['anchors']:
             x, y = anchor['xy']
             r = anchor.get('radius', PATCH_RADIUS)
@@ -111,10 +122,70 @@ class CameraAlignment:
                 or cv2.contourArea(cv2.convexHull(points)) < min_area * np.prod(self.size)):
             raise ValueError('至少需要四个不同且分散的固定对准点。')
 
+    def build_holder_locator(self, regions, *references):
+        left = min(rect[0] for rect in regions)
+        top = min(rect[1] for rect in regions)
+        right = max(rect[2] for rect in regions)
+        bottom = max(rect[3] for rect in regions)
+        self.locator_origin = np.array([left, top])
+        mask = np.zeros((bottom - top, right - left), np.uint8)
+        for x0, y0, x1, y1 in regions:
+            mask[y0-top:y1-top, x0-left:x1-left] = 1
+        for gray in references:
+            template = small_edges(gray[top:bottom, left:right])
+            for scale in HOLDER_SCALES:
+                scaled = cv2.resize(template, None, fx=scale, fy=scale)
+                scaled_mask = cv2.resize(mask, scaled.shape[::-1], interpolation=cv2.INTER_NEAREST)
+                self.holder_locator.append((scale, scaled, scaled_mask))
+
+    def search_holder_region(self, gray):
+        edges = small_edges(gray)
+        hits = []
+        for scale, template, mask in self.holder_locator:
+            response = cv2.matchTemplate(edges, template, cv2.TM_CCOEFF_NORMED, mask=mask)
+            response[~np.isfinite(response)] = -1
+            _, score, _, corner = cv2.minMaxLoc(response)
+            if score >= .47:
+                hits.append((score, scale, corner))
+        for _, scale, corner in sorted(hits, reverse=True):
+            offset = np.asarray(corner) / LOCATOR_SCALE - scale * self.locator_origin
+            yield np.column_stack((np.eye(2) * scale, offset))
+
+    def refine_holder_region(self, gray, seed, radius):
+        rough = cv2.warpAffine(gray, seed, self.size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
+        edges = holder_edges(rough)
+        readings = self.match_points(rough, radius, edges=edges)
+        matrix, used = self.fit_source_fixture(readings)
+        if matrix is None:
+            return None, [], readings
+        guided = self.match_points(rough, 15, edges=edges, prediction=matrix)
+        refined, refined_used = self.fit_source_fixture(guided)
+        if refined is not None and self.coverage(guided, refined_used) > self.coverage(readings, used):
+            matrix, used, readings = refined, refined_used, guided
+        matrix = seed @ np.vstack((matrix, [0, 0, 1]))
+        if not self.source_visible(matrix):
+            return None, [], readings
+        for point in readings:
+            if point['current_xy'] is not None:
+                xy = np.rint(seed @ [*point['current_xy'], 1]).astype(int)
+                point['current_xy'] = xy.tolist()
+                point['shift_px'] = round(float(np.linalg.norm(xy - point['reference_xy'])), 2)
+        return matrix, used, readings
+
+    @staticmethod
+    def coverage(points, names):
+        support = np.float32([p['reference_xy'] for p in points if p['name'] in names])
+        return cv2.contourArea(cv2.convexHull(support))
+
     def measure(self, frame):
         if tuple(frame.shape[1::-1]) != self.size:
             raise ValueError(f'相机分辨率须为 {self.size[0]}×{self.size[1]}，与参考画面一致。')
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        if self.holder_locator and self.source_seed is not None:
+            matrix, used, readings = self.refine_holder_region(gray, self.source_seed, 14)
+            if matrix is not None:
+                return self.source_report(readings, matrix, used)
+            self.source_seed = None
         edges = holder_edges(gray) if self.uses_holder_surfaces else None
         search = SOURCE_SEARCH_RADIUS if self.source_bounds else SEARCH_RADIUS
         if self.uses_holder_surfaces:
@@ -139,17 +210,20 @@ class CameraAlignment:
                 guided = self.match_points(gray, 20, edges=edges, prediction=matrix)
                 refined, refined_used = self.fit_source_fixture(guided)
                 if refined is not None:
-                    def coverage(points, names):
-                        support = np.float32([p['reference_xy'] for p in points if p['name'] in names])
-                        return cv2.contourArea(cv2.convexHull(support))
-
-                    if coverage(guided, refined_used) > coverage(readings, used):
+                    if self.coverage(guided, refined_used) > self.coverage(readings, used):
                         matrix, used, readings = refined, refined_used, guided
+            if self.holder_locator and (matrix is None or np.linalg.norm(matrix[:, :2] - np.eye(2), ord=2) > .14):
+                for seed in self.search_holder_region(gray):
+                    found, found_used, found_readings = self.refine_holder_region(gray, seed, 24)
+                    if found is not None:
+                        matrix, used, readings = found, found_used, found_readings
+                        break
+            if self.holder_locator:
+                self.source_seed = matrix
         if self.uses_holder_surfaces:
-            aligned = matrix is not None and all(r['shift_px'] <= self.tolerance for r in readings if r['name'] in used)
-        else:
-            aligned = all(r['shift_px'] is not None and r['shift_px'] <= self.tolerance for r in readings)
-        if aligned and not self.uses_holder_surfaces:
+            return self.source_report(readings, matrix, used)
+        aligned = all(r['shift_px'] is not None and r['shift_px'] <= self.tolerance for r in readings)
+        if aligned:
             reference = np.float32([(*r['reference_xy'], 1) for r in readings])
             current = np.float32([r['current_xy'] for r in readings])
             transform = np.linalg.lstsq(reference, current, rcond=None)[0]
@@ -159,9 +233,15 @@ class CameraAlignment:
         if self.source_bounds:
             report.update(source_ready=matrix is not None, source_inliers=used,
                           source_transform=matrix.tolist() if matrix is not None else None)
-            if self.uses_holder_surfaces:
-                report['source_matcher'] = 'holder_surfaces'
         return report
+
+    def source_report(self, readings, matrix, used):
+        ready = matrix is not None
+        aligned = ready and all(p['shift_px'] <= self.tolerance for p in readings if p['name'] in used)
+        return {'aligned': aligned, 'camera_name': self.profile['camera_name'],
+                'reference_sha256': self.reference_sha256, 'max_shift_px': self.tolerance,
+                'points': readings, 'source_ready': ready, 'source_inliers': used,
+                'source_transform': matrix.tolist() if ready else None, 'source_matcher': 'holder_surfaces'}
 
     def match_points(self, gray, search_radius, offset=(0, 0), *, edges=None, prediction=None):
         height, width = gray.shape
@@ -214,12 +294,15 @@ class CameraAlignment:
                 or cv2.contourArea(cv2.convexHull(support)) < 2800
                 or np.linalg.norm(matrix[:, :2] - np.eye(2), ord=2) > (.24 if self.uses_holder_surfaces else .16)):
             return None, []
+        if not self.source_visible(matrix):
+            return None, []
+        return matrix, [p['name'] for p, good in zip(matches, valid) if good]
+
+    def source_visible(self, matrix):
         left, top, right, bottom = self.source_bounds
         bounds = np.float32([[(left, top), (right, top), (right, bottom), (left, bottom)]])
         visible = cv2.transform(bounds, matrix)[0]
-        if not ((visible >= 4) & (visible < np.array(self.size) - 4)).all():
-            return None, []
-        return matrix, [p['name'] for p, good in zip(matches, valid) if good]
+        return ((visible >= 4) & (visible < np.array(self.size) - 4)).all()
 
     def register_source(self, frame, report):
         """Compensate small camera shifts for source color sampling."""
@@ -247,12 +330,15 @@ class CameraAlignment:
         return cv2.warpAffine(frame, matrix, self.size)
 
 
-def open_alignment(profile_path=DEFAULT_PROFILE, output=None):
+def open_alignment(profile_path=DEFAULT_PROFILE, output=None, *, source_config=None):
     from tkinter import BOTH, LEFT, RIGHT, X, Canvas, StringVar, Tk, ttk
     from PIL import Image, ImageTk
     from camera_vision_app import CameraStream
+    from .vision import StableRead, load_stack_reader, mark_source
 
     alignment = CameraAlignment(profile_path)
+    reader = load_stack_reader(source_config, 'source') if source_config else None
+    stable_read = StableRead()
     if output is not None:
         if output.suffix.lower() not in ('.png', '.jpg', '.jpeg'):
             raise ValueError('对位截图路径须以 .png、.jpg 或 .jpeg 结尾。')
@@ -286,7 +372,7 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None):
     ttk.Label(panel, textvariable=detail, wraplength=1030).pack(anchor='w', pady=(6, 0))
     good_frames, stable_since = 0, None
     ready = saved = False
-    last_frame, last_report, last_stamp = None, None, None
+    last_frame, last_report, last_stamp, inventory_report = None, None, None, None
     stream = CameraStream(index, alignment.size)
     root.bind('<Escape>', lambda _: root.destroy())
 
@@ -299,6 +385,8 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None):
             frame = cv2.addWeighted(frame, .65, alignment.reference, .35, 0)
         elif view == 'corrected' and report and report['source_ready']:
             frame = alignment.register_source(frame, report)
+            if inventory_report:
+                frame = mark_source(frame, inventory_report)
         scale = min(canvas.winfo_width() / frame.shape[1], canvas.winfo_height() / frame.shape[0])
         if scale <= .01:
             return
@@ -351,7 +439,7 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None):
         ttk.Button(controls, text='对齐后保存', command=save_frame).pack(side=RIGHT, padx=8)
 
     def tick():
-        nonlocal last_frame, last_report, last_stamp, good_frames, stable_since, ready
+        nonlocal last_frame, last_report, last_stamp, good_frames, stable_since, ready, inventory_report
         try:
             status.set(stream.messages.get_nowait())
         except Empty:
@@ -366,19 +454,29 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None):
             try:
                 last_report = alignment.measure(last_frame)
                 matched = last_report.get('source_ready', last_report['aligned'])
-                if matched:
+                if reader:
+                    registered = alignment.register_source(last_frame, last_report) if matched else None
+                    inventory_report = stable_read.update(reader.read(registered, registered=True) if registered is not None
+                                                          else {'complete': False}, last_stamp)
+                    ready = inventory_report['stable']
+                elif matched:
                     stable_since = last_stamp if stable_since is None else stable_since
                     good_frames = min(good_frames + 1, REQUIRED_FRAMES)
+                    ready = good_frames >= REQUIRED_FRAMES and last_stamp - stable_since >= STABLE_SECONDS
                 else:
-                    good_frames, stable_since = 0, None
-                ready = good_frames >= REQUIRED_FRAMES and last_stamp - stable_since >= STABLE_SECONDS
+                    good_frames, stable_since, ready = 0, None, False
                 if alignment.source_bounds:
                     if ready:
-                        status.set('S 区可用于任务 · 请锁紧支架')
-                        detail.set('程序已自动补偿机位偏移。锁紧后仍显示可用，即可关闭窗口。')
+                        if reader:
+                            status.set('S 区识别通过 · 可关闭此窗口')
+                            detail.set(f'已确认 {inventory_report["observed_count"]} 块方块'
+                                       f'和 {inventory_report["confirmed_empty_count"]} 个空位。')
+                        else:
+                            status.set('S 区定位通过')
+                            detail.set('程序已自动补偿机位偏移。')
                     elif matched:
-                        status.set('已找到 S 区 · 请保持支架静止')
-                        detail.set('正在确认画面稳定。')
+                        status.set('已找到 S 区 · 正在确认层位')
+                        detail.set(inventory_report['status'] if reader else '正在确认画面稳定。')
                     else:
                         status.set('暂未找到 S 区')
                         detail.set(SOURCE_ADJUST_HINT)
@@ -387,7 +485,7 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None):
                     detail.set('    '.join(f'{p["name"]} {p["shift_px"]:g}px' if p['shift_px'] is not None
                                            else f'{p["name"]} 未找到' for p in last_report['points']))
             except ValueError as error:
-                good_frames, stable_since, ready, last_report = 0, None, False, None
+                good_frames, stable_since, ready, last_report, inventory_report = 0, None, False, None, None
                 status.set(str(error))
         render(last_frame if last_frame is not None else alignment.reference, last_report)
         root.after(80, tick)
