@@ -1,0 +1,6 @@
+{
+  "model_path": "../outputs/digits/paper_v6_20261028/training_final/best.pt",
+  "verifier_model_path": "../outputs/digits/mnist_cnn_v1/best.pt",
+  "color_config_path": "replay_global_target_colors.json",
+  "locate_four_corners": true
+}

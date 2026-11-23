@@ -1,15 +1,16 @@
 """Four target papers and eight separately calibrated visible source faces."""
 from collections import Counter
 import copy
+from itertools import combinations
 import time
 
 import cv2
 import numpy as np
 
 from camera_vision import classify_sample, read_image
-from grid_reader.core import GridReader, annotate, order_quad, warp_quad
+from grid_reader.core import GridReader, annotate, warp_quad
 from handwritten_digits.camera import orient
-from .planner import SLOTS, TARGETS, validate_inventory, validate_targets
+from .planner import SLOTS, TARGETS, validate_targets
 
 
 def corner_order(cells):
@@ -23,10 +24,43 @@ def corner_order(cells):
     bottom = sorted(by_y[2:], key=lambda i: centers[i, 0])
     order = top + bottom
     size = np.median([np.sqrt(cv2.contourArea(np.float32(c['quad_px']))) for c in cells])
+    # Oblique wrist views can put the centers only one card-width apart along x.
     if (min(centers[bottom, 1]) - max(centers[top, 1]) < size * .5 or
-            any(centers[b, 0] - centers[a, 0] < size * 1.5 for a, b in (top, bottom))):
+            any(centers[b, 0] - centers[a, 0] < size for a, b in (top, bottom))):
         raise ValueError('四角间距或朝向不清晰，不能可靠编号。')
     return order
+
+
+def find_four_corners(cells):
+    """Find a single board-sized group in the rotated full-frame color detections."""
+    candidates = []
+    eligible = [i for i, cell in enumerate(cells) if not cell['clipped'] and cell['color']['reliable']]
+    for indices in combinations(eligible, 4):
+        group = [cells[i] for i in indices]
+        if len({cell['color']['key'] for cell in group}) != 4:
+            continue
+        try:
+            order = corner_order(group)
+        except ValueError:
+            continue
+        areas = [cv2.contourArea(np.float32(cell['quad_px'])) for cell in group]
+        if min(areas) <= 0 or max(areas) > 2.4 * min(areas):
+            continue
+        size = np.sqrt(np.median(areas))
+        top_left, top_right, bottom_left, bottom_right = [np.array(group[i]['center_px']) for i in order]
+        top, bottom = top_right - top_left, bottom_right - bottom_left
+        left, right = bottom_left - top_left, bottom_right - top_right
+        spans = np.linalg.norm([top, bottom, left, right], axis=1) / size
+        skew = (np.linalg.norm(top - bottom) + np.linalg.norm(left - right)) / size
+        if spans.min() < 1. or spans.max() > 3.1 or skew > .75:
+            continue
+        candidates.append((float(skew), [indices[i] for i in order]))
+    if not candidates:
+        raise ValueError(f'全画面检测到 {len(cells)} 个颜色区域，未定位到完整的四角任务卡。')
+    candidates.sort()
+    if len(candidates) > 1 and candidates[1][0] - candidates[0][0] < .15:
+        raise ValueError('全画面有多组相近的四角彩纸，请移开 T 区周围的干扰物。')
+    return candidates[0][1]
 
 
 class TargetReader:
@@ -35,7 +69,8 @@ class TargetReader:
     rotation_cw=None tries four orientations; a calibrated/marker-rectified
     frame can supply 0. A single-paper scan must supply its known scan pose ID.
     """
-    def __init__(self, predictor, color_config, rotation_cw=None, target=None, verifier=None, *, quantity_rule='parity'):
+    def __init__(self, predictor, color_config, rotation_cw=None, target=None, verifier=None, *,
+                 quantity_rule='parity', locate_four_corners=False):
         if rotation_cw not in (None, 0, 90, 180, 270):
             raise ValueError('方向须为自动或顺时针 0/90/180/270 度。')
         if target is not None and target not in TARGETS:
@@ -44,6 +79,7 @@ class TargetReader:
         self.rotation, self.target = rotation_cw, target
         self.verifier = verifier
         self.quantity_rule = quantity_rule
+        self.locate_four_corners = locate_four_corners and target is None
 
     def read(self, frame):
         candidates = []
@@ -52,9 +88,12 @@ class TargetReader:
             base, _, debug = self.reader.read_blocks(rotated, draw=False)
             expected = 1 if self.target else 4
             try:
-                if len(base['cells']) != expected:
-                    raise ValueError(f'期望 {expected} 张彩纸，检测到 {len(base["cells"])} 个颜色区域。')
-                order = [0] if self.target else corner_order(base['cells'])
+                if self.locate_four_corners:
+                    order = find_four_corners(base['cells'])
+                else:
+                    if len(base['cells']) != expected:
+                        raise ValueError(f'期望 {expected} 张彩纸，检测到 {len(base["cells"])} 个颜色区域。')
+                    order = [0] if self.target else corner_order(base['cells'])
             except ValueError as exc:
                 candidates.append((0., rotation, {'complete': False, 'cells': [], 'status': str(exc)}, rotated))
                 continue

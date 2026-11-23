@@ -319,7 +319,7 @@ class Teleoperator:
             raise TeleopError('已确认从臂 6 个关节扭矩关闭，但部分退出配置未恢复。' + '; '.join(config_errors))
 
     def run(self, *, dry_run=False, stop=keyboard_stop, clock=time.monotonic, sleep=time.sleep,
-            emit=print, on_frame=None, target_source=None):
+            emit=print, on_frame=None, target_source=None, tracking_progress=False):
         if (self.leader is None) != (target_source is not None):
             raise TeleopError('实时跟随需要主臂；独立回放需要轨迹目标源。')
         previous_leader, previous_follower = self.preflight(require_alignment=not dry_run)
@@ -513,14 +513,22 @@ class Teleoperator:
                         contact = joint == 'gripper' and gripper_closing_contact(
                             follower[joint], last_goals[joint], goals[joint], self.follower_cal)
                         if error > 20 and not contact:
+                            measure = follower[joint] if tracking_progress else error
                             if joint not in bad_since:
                                 bad_since[joint] = now
-                                bad_error[joint] = error
-                            elif error < bad_error[joint] - .25:
-                                # 起始偏差较大时允许限速追赶；只拦持续不接近目标的受阻。
-                                bad_since[joint] = now
-                                bad_error[joint] = error
-                            if now - bad_since[joint] > 1:
+                                bad_error[joint] = measure
+                            else:
+                                if tracking_progress:
+                                    toward_goal = math.copysign(1, last_goals[joint] - follower[joint])
+                                    advancing = (measure - bad_error[joint]) * toward_goal * TICK_DEGREES > .25
+                                else:
+                                    advancing = error < bad_error[joint] - .25
+                                if advancing:
+                                    bad_since[joint] = now
+                                    bad_error[joint] = measure
+                            if tracking_progress and now - bad_since[joint] > 4:
+                                raise TeleopError(f'{joint} 连续 4 秒未向目标推进，停止扫描。')
+                            if not tracking_progress and now - bad_since[joint] > 1:
                                 raise TeleopError(f'{joint} 持续跟踪误差超过 20°，可能受阻，停止。')
                         else:
                             bad_since.pop(joint, None)

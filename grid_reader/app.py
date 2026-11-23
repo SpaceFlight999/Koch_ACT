@@ -66,8 +66,8 @@ class GridApp:
         self.camera_name = None
         self.camera_size = list(camera_size)
         self.generation = 0
-        self.worker = LatestWorker(reader)
-        self.save_executor = ThreadPoolExecutor(max_workers=1)
+        self.worker = None if task_camera else LatestWorker(reader)
+        self.save_executor = None if task_camera else ThreadPoolExecutor(max_workers=1)
         self.save_future = None
         self.pending_save = None
         self.capture_future = None
@@ -577,11 +577,18 @@ class GridApp:
 
     def close(self):
         self.closing = True
-        self.worker.stop()
-        self.save_executor.shutdown(wait=False, cancel_futures=True)
+        self.cancel_callbacks()
+        if self.worker is not None:
+            self.worker.stop()
+        if self.save_executor is not None:
+            self.save_executor.shutdown(wait=False, cancel_futures=True)
         if self.stream:
             self.stream.stop()
         self.wait_close(time.monotonic())
+
+    def cancel_callbacks(self):
+        for callback in self.root.tk.splitlist(self.root.tk.call('after', 'info')):
+            self.root.after_cancel(callback)
 
     def wait_close(self, start):
         if self.stream and self.stream.thread.is_alive() and time.monotonic() - start < 2:

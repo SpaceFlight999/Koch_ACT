@@ -24,19 +24,42 @@ def load_target_reader(rotation=None, target=None, config_path=None, quantity_ru
     from handwritten_digits.model import Predictor
     from .vision import TargetReader
     return TargetReader(Predictor(model), read_json(colors), rotation, target,
-                        verifier=Predictor(verifier), quantity_rule=quantity_rule)
+                        verifier=Predictor(verifier), quantity_rule=quantity_rule,
+                        locate_four_corners=config.get('locate_four_corners', False))
 
 
 def camera_observe(args, *, on_view=None, cancelled=None):
     import cv2
     from camera_vision import read_image, write_image
     from .vision import SourceReader, TargetStackReader, StableRead, rectify_marked_plane
+    alignment = None
+    if getattr(args, 'alignment', None) is not None:
+        from .camera_alignment import CameraAlignment, SOURCE_ADJUST_HINT
+        alignment = CameraAlignment(args.alignment)
+        if args.kind != 'source' or args.camera_name != alignment.profile['camera_name']:
+            raise ValueError('S 区相机名须与全局相机对位配置一致。')
     plane = read_json(args.plane) if args.plane else None
     if plane and (args.kind != 'targets' or plane.get('scope') != 'target_paper_plane'):
         raise ValueError('平面校正仅用于 T 彩纸平面，不能当作三维方块或 ACT 相机视角补偿。')
     if plane and args.rotation not in (None, 0):
         raise ValueError('标记平面已定义正方向，不能再次旋转编号。')
     def read_frame(frame):
+        if alignment is not None:
+            aligned = alignment.measure(frame)
+            registered = alignment.register_source(frame, aligned)
+            if registered is None:
+                marked = frame.copy()
+                for point in aligned['points']:
+                    goal = tuple(point['reference_xy'])
+                    cv2.drawMarker(marked, goal, (255, 215, 45), cv2.MARKER_CROSS, 25, 3)
+                    if point['current_xy'] is not None:
+                        cv2.arrowedLine(marked, tuple(point['current_xy']), goal, (35, 185, 255), 3)
+                hint = (SOURCE_ADJUST_HINT if alignment.source_bounds else
+                        '请打开「全局相机对位」调整支架。')
+                return ({'complete': False, 'stable': False, 'alignment': aligned,
+                         'status': f'全局相机暂不能定位 S 区。{hint}'}, marked)
+            aligned['source_registration_applied'] = registered is not frame
+            frame = registered
         if plane:
             frame, visible, _ = rectify_marked_plane(frame, plane)
         if args.roi:
@@ -51,6 +74,8 @@ def camera_observe(args, *, on_view=None, cancelled=None):
         result = reader.read(frame)
         report, marked = result if isinstance(result, tuple) else (result, frame)
         report.update(input_roi=args.roi, marked_plane_registration=bool(plane))
+        if alignment is not None:
+            report['alignment'] = aligned
         return report, marked
     if args.kind == 'targets':
         reader = load_target_reader(0 if plane else args.rotation, args.target, args.config,
@@ -114,12 +139,17 @@ def camera_observe(args, *, on_view=None, cancelled=None):
                     report.update(stable=False, status='用户停止读取。')
                     break
             if report['stable']:
-                write_image(args.output.with_suffix('.png'), marked)
                 break
+        if 'marked' in locals():
+            write_image(args.output.with_suffix('.png'), marked)
+            if not report['stable']:
+                raw_path = args.output.with_name(args.output.stem + '-raw.png')
+                write_image(raw_path, frame)
+                report['raw_frame'] = raw_path.name
         save_json(args.output, report)
         print(report['status'], 'stable=', report['stable'])
         if not report['stable']:
-            raise ValueError(f'没有取得稳定读取；诊断已保存到 {args.output}')
+            raise ValueError(f'{report["status"]} 没有取得稳定读取；诊断已保存到 {args.output}')
         return report
     finally:
         capture.release()
@@ -247,9 +277,17 @@ def main(argv=None):
     p.add_argument('--plan', type=Path, required=True, help='plan/simulate/demo 输出的 JSON。')
     p.add_argument('--output', type=Path, required=True)
     sub.add_parser('cameras')
-    p = sub.add_parser('replay-auto', help='自动识别、连续执行、结束时检查 S 区是否清空。')
+    p = sub.add_parser('align-camera', help='显示全局相机参考点与实时偏移。')
+    p.add_argument('--profile', type=Path, default=ROOT / 'configs/replay_camera_alignment.json')
+    p.add_argument('--output', type=Path, help='对齐后可保存当前原图和偏移报告。')
+    p = sub.add_parser('replay-auto', help='自动识别、连续执行、结束时核对 S 区剩余库存。')
     p.add_argument('--site', type=Path, required=True, help='同伴电脑的相机、从臂和路径配置。')
-    p.add_argument('--preview', action='store_true', help='只识别并生成计划，不连接机械臂。')
+    mode = p.add_mutually_exclusive_group()
+    mode.add_argument('--preview', action='store_true', help='从当前取景识别并生成计划，不连接机械臂。')
+    mode.add_argument('--scan-only', action='store_true', help='从休息位到 T 区扫描，返回休息位后结束。')
+    p.add_argument('--reviewed-targets', type=Path, help='使用人工核对的 T1–T4 任务卡 JSON，跳过腕部扫描。')
+    p.add_argument('--carry-rate', type=float, default=replay_bridge.RATE,
+                   help='搬运示范的回放倍率，仍按关节限速重定时。')
     p = sub.add_parser('replay-ui', help='打开相机画面与自动 Replay 进度面板。')
     p.add_argument('--site', type=Path, required=True, help='自动搬运的现场配置。')
     replay_bridge.configure_cli(sub)
@@ -284,9 +322,16 @@ def main(argv=None):
         elif args.command == 'cameras':
             from grid_reader.cameras import video_devices
             print(json.dumps([{'index': i, 'name': name} for i, name in enumerate(video_devices())], ensure_ascii=False, indent=2))
+        elif args.command == 'align-camera':
+            from .camera_alignment import open_alignment
+            if not open_alignment(args.profile, args.output):
+                parser.exit(1, '全局相机对位未确认。\n')
         elif args.command == 'replay-auto':
             from .replay_auto import run_auto
-            run_auto(args.site, args.preview, camera_observe)
+            if args.scan_only and args.reviewed_targets is not None:
+                raise ValueError('--scan-only 与 --reviewed-targets 不能同时使用。')
+            run_auto(args.site, args.preview, camera_observe, scan_only=args.scan_only,
+                     reviewed_targets=args.reviewed_targets, carry_rate=args.carry_rate)
         elif args.command == 'replay-ui':
             from .replay_dashboard import open_dashboard
             open_dashboard(args.site, camera_observe)

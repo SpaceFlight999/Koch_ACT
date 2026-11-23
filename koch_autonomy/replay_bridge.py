@@ -26,7 +26,7 @@ def fingerprint(episode):
     return result
 
 
-def read_trajectory(episode, route, calibration=None):
+def read_trajectory(episode, route, calibration=None, *, rate=RATE, speed=SPEED, observed_body=False):
     from koch_dataset import ReplayTrajectory
     from teleoperate_koch import TICK_DEGREES
 
@@ -40,7 +40,8 @@ def read_trajectory(episode, route, calibration=None):
             frames = sum(bool(line.strip()) for line in stream)
         if frames != meta['joint_frames']:
             raise ValueError(f'{episode}: 关节帧数与录制元数据不一致。')
-    return ReplayTrajectory(episode, meta['follower_calibration'] if calibration is None else calibration, RATE, SPEED)
+    return ReplayTrajectory(episode, meta['follower_calibration'] if calibration is None else calibration, rate, speed,
+                            observed_body=observed_body)
 
 
 def route_episodes(root, pair, route):

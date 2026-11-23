@@ -169,6 +169,29 @@ class VisionTests(unittest.TestCase):
                 self.assertEqual([report['targets'][t]['color'] for t in ('T1', 'T2', 'T3', 'T4')],
                                  ['red', 'blue', 'yellow', 'green'])
 
+    def test_global_target_reader_finds_shifted_four_corners_with_an_extra_region(self):
+        config, colors = color_config()
+        config['perspective_corners'] = True
+        frame = np.full((520, 760, 3), 230, np.uint8)
+        for color, (x, y) in zip(colors.values(), ((290, 80), (470, 80), (290, 260), (470, 260))):
+            frame[y:y+90, x:x+90] = color
+        frame[350:430, 60:140] = colors['red']
+        predictor = type('Predictor', (), {'path': 'test-only'})()
+        reader = TargetReader(predictor, config, rotation_cw=90, locate_four_corners=True)
+
+        def numbers(oriented, grid, tiles, colors, base):
+            self.assertEqual(oriented.shape, frame.shape)
+            self.assertEqual(len(tiles), 4)
+            for i, cell in enumerate(base['cells']):
+                cell.update(number=str(i+1), number_score=.99, confirmed=True)
+            return {**base, 'complete': True}, oriented, []
+
+        with patch.object(reader.reader, 'read_numbers', side_effect=numbers):
+            report, _ = reader.read(np.ascontiguousarray(np.rot90(frame)))
+        self.assertTrue(report['complete'], report)
+        self.assertEqual([report['targets'][t]['color'] for t in ('T1', 'T2', 'T3', 'T4')],
+                         ['red', 'blue', 'yellow', 'green'])
+
     def test_automatic_rotation_requires_decisive_evidence(self):
         frame, config = paper_image()
         reader = TargetReader(type('Predictor', (), {'path': 'test-only'})(), config)

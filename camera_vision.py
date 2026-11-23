@@ -175,6 +175,8 @@ def detect(frame, config):
                 labels[valid] = index
     kernel = np.ones((3, 3), np.uint8)
     min_area = max(config["min_area"], width * height * config.get("min_area_fraction", 0))
+    perspective = config.get('perspective_corners')
+    max_aspect = 2.6 if perspective else 2.0
     detections = []
     for index, key in enumerate(keys):
         mask = np.uint8(labels == index) * 255
@@ -188,7 +190,7 @@ def detect(frame, config):
                 continue
             rect = cv2.minAreaRect(contour)
             rw, rh = rect[1]
-            if min(rw, rh) < 8 or max(rw, rh) / min(rw, rh) > 2.0 or area / (rw * rh) < 0.65:
+            if min(rw, rh) < 8 or max(rw, rh) / min(rw, rh) > max_aspect or area / (rw * rh) < 0.65:
                 continue
             x, y, w, h = cv2.boundingRect(contour)
             clipped = x <= x1 + 1 or y <= y1 + 1 or x + w >= x2 - 1 or y + h >= y2 - 1
@@ -196,6 +198,12 @@ def detect(frame, config):
             box = cv2.boxPoints(rect)
             edge = box[1] - box[0]
             angle = float(np.degrees(np.arctan2(edge[1], edge[0])) % 90)
+            if perspective:
+                hull = cv2.convexHull(contour)
+                quad = cv2.approxPolyDP(hull, .025 * cv2.arcLength(hull, True), True)
+                if len(quad) == 4 and area <= 1.15 * cv2.contourArea(quad):
+                    box = quad.reshape(4, 2).astype(np.float32)
+                    center = box.mean(axis=0).tolist()
             # 立体方块的侧面会扩大颜色轮廓；用包围框中央的顶面重新核对类别。
             px0, px1 = x + int(w * .22), x + int(w * .78)
             py0, py1 = y + int(h * .22), y + int(h * .78)

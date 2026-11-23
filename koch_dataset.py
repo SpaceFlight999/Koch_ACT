@@ -285,11 +285,8 @@ class EpisodeRecorder:
 
 class ReplayTrajectory:
     """用实际发送成功的从臂目标回放，夹持时保留闭合目标；不需要主臂。"""
-    def __init__(self, episode, follower_cal, rate=REPLAY_DEFAULT_RATE, max_speed=REPLAY_DEFAULT_SPEED):
-        if not math.isfinite(rate) or not .1 <= rate <= 1:
-            raise TeleopError('回放倍率须为 0.1–1，默认 1。')
-        if not math.isfinite(max_speed) or not MIN_SPEED <= max_speed <= MAX_SPEED:
-            raise TeleopError(f'速度须为 {MIN_SPEED:g}–{MAX_SPEED:g}°/s。')
+    def __init__(self, episode, follower_cal, rate=REPLAY_DEFAULT_RATE, max_speed=REPLAY_DEFAULT_SPEED,
+                 *, observed_body=False):
         self.path = Path(episode)
         self.meta = json.loads((self.path / 'episode.json').read_text(encoding='utf-8'))
         if (self.meta.get('schema_version') != 1 or self.meta.get('status') != 'complete'
@@ -297,9 +294,26 @@ class ReplayTrajectory:
             raise TeleopError('只能回放本程序已确认完成的完整记录。')
         if self.meta.get('follower_calibration') != follower_cal:
             raise TeleopError('当前从臂校准与采集时不一致，禁止直接回放。')
+        rows = [r for r in read_jsonl(self.path / 'joints.jsonl') if r.get('sent') is True]
+        if observed_body:
+            rows = [{**row, 'goal_raw': {**row['follower_raw'], 'gripper': row['goal_raw']['gripper']}}
+                    for row in rows]
+        self._initialize(rows, follower_cal, rate, max_speed)
+
+    @classmethod
+    def from_rows(cls, path, label, rows, follower_cal, rate, max_speed):
+        trajectory = cls.__new__(cls)
+        trajectory.path, trajectory.meta = Path(path), {'route': label}
+        trajectory._initialize(rows, follower_cal, rate, max_speed)
+        return trajectory
+
+    def _initialize(self, rows, follower_cal, rate, max_speed):
+        if not math.isfinite(rate) or not .1 <= rate <= 1:
+            raise TeleopError('回放倍率须为 0.1–1，默认 1。')
+        if not math.isfinite(max_speed) or not MIN_SPEED <= max_speed <= MAX_SPEED:
+            raise TeleopError(f'速度须为 {MIN_SPEED:g}–{MAX_SPEED:g}°/s。')
         self.cal, self.requested_rate = follower_cal, rate
-        rows = read_jsonl(self.path / 'joints.jsonl')
-        self.rows = [r for r in rows if r.get('sent') is True]
+        self.rows = rows
         if len(self.rows) < 2:
             raise TeleopError('有效动作帧不足 2 帧，无法回放。')
         absolute = [r['command_time'] for r in self.rows]
@@ -313,6 +327,7 @@ class ReplayTrajectory:
         self.recorded_duration = absolute[-1] - absolute[0]
         motor_speed = max(1, math.floor(max_speed / (0.229 * 6))) * (0.229 * 6)
         safe_speed = .9 * min(max_speed, motor_speed)
+        self.safe_speed = safe_speed
         # 只延长超速的相邻段，避免一个抖动时间戳把整条记录压成慢动作。
         rows, self.times = [self.rows[0]], [0.0]
         for a, b, ta, tb in zip(self.rows, self.rows[1:], absolute, absolute[1:]):
@@ -332,6 +347,65 @@ class ReplayTrajectory:
         self.rate = self.recorded_duration / self.duration
         self.shift = None
         self.at_end = self.settled = False
+        self.align_start = False
+        self.start_tolerance = 2.5
+        self.alignment_speed = None
+        self.alignment_transition = None
+        self.alignment_hold_seconds = 0.
+        self.aligned_since = None
+        self.use_recorded_endpoint_feedback = False
+        self.allow_endpoint_hold = False
+        self.endpoint_tolerance = 3.
+        self.follow_feedback = False
+        self.minimum_feedback_pace = 0.
+        self.feedback_time = self.last_elapsed = 0.
+        self.trimmed_seconds = 0.
+        self.motion_origin = None
+
+    def trim_wait(self, *, after_settle=False):
+        first = self.rows[0]['goal_raw']
+        def delta(goal_a, goal_b):
+            return max(abs(goal_a[n] - goal_b[n]) for n in NAMES) * TICK_DEGREES
+
+        def departure_from(start):
+            goal = self.rows[start]['goal_raw']
+            return next((i for i in range(start + 1, len(self.rows))
+                         if delta(goal, self.rows[i]['goal_raw']) > .75), None)
+
+        if after_settle:
+            # Some demos move a few degrees to settle at home before the operator waits.
+            # Preserve this movement and remove only an early near-static section.
+            for start, row in enumerate(self.rows):
+                if self.times[start] > 1.4 or delta(first, row['goal_raw']) > REPLAY_START_ALIGNMENT_DEGREES:
+                    break
+                departure = departure_from(start)
+                if departure is None or self.times[departure] - self.times[start] < 1.2:
+                    continue
+                resume = bisect.bisect_right(self.times, self.times[departure] - .15) - 1
+                transition = max(.15, delta(row['goal_raw'], self.rows[resume]['goal_raw']) / self.safe_speed)
+                cut = self.times[resume] - self.times[start] - transition
+                if cut <= 0:
+                    continue
+                stationary_recorded = self.rows[resume]['command_time'] - row['command_time']
+                self.rows = self.rows[:start+1] + self.rows[resume:]
+                self.times = self.times[:start+1] + [value - cut for value in self.times[resume:]]
+                self.duration, self.trimmed_seconds = self.times[-1], cut
+                self.rate = (self.recorded_duration - stationary_recorded + transition * self.requested_rate) / self.duration
+                return
+            return
+
+        departure = departure_from(0)
+        if departure is None:
+            return
+        # Preserve the last 150 ms before the first detected departure.
+        index = max(0, bisect.bisect_right(self.times, self.times[departure] - .15) - 1)
+        cut = self.times[index]
+        self.trimmed_seconds = cut
+        self.rows = self.rows[index:]
+        self.times = [time - cut for time in self.times[index:]]
+        self.duration = self.times[-1]
+        recorded = self.rows[-1]['command_time'] - self.rows[0]['command_time']
+        self.rate = recorded / self.duration
 
     def __call__(self, elapsed, actual, previous):
         if self.shift is None:
@@ -344,6 +418,49 @@ class ReplayTrajectory:
                 self.shift = None
                 raise TeleopError(f'回放起点相差超过 {REPLAY_START_ALIGNMENT_DEGREES}°，'
                                   '请在扭矩关闭时手动对齐：' + '、'.join(difference))
+        if self.align_start:
+            if self.motion_origin is None:
+                first = {n: self.rows[0]['goal_raw'][n] + self.shift[n] for n in NAMES}
+                if self.alignment_speed is not None:
+                    if self.alignment_transition is None:
+                        if elapsed == 0:
+                            return previous
+                        travel = max(abs(first[n] - previous[n]) for n in NAMES) * TICK_DEGREES
+                        # Smoothstep peaks at 1.5 times its average speed.
+                        self.alignment_transition = dict(previous), elapsed, 1.5 * travel / self.alignment_speed
+                    origin, started, duration = self.alignment_transition
+                    if elapsed - started < duration:
+                        phase = (elapsed - started) / duration
+                        weight = phase * phase * (3 - 2 * phase)
+                        goals = {n: round(origin[n] + weight * (first[n] - origin[n])) for n in NAMES}
+                        checked_angles(goals, self.cal)
+                        return goals
+                errors = {n: first[n] - actual[n] for n in NAMES}
+                if max(map(abs, errors.values())) * TICK_DEGREES > self.start_tolerance:
+                    self.aligned_since = None
+                    if elapsed > 4:
+                        raise TeleopError('4 秒内未对准录制起点，停止 Replay。')
+                    # A small, gradual offset can overcome static joint error at rest.
+                    # Keep the recorded gripper target throughout alignment.
+                    bias = min(22, int(max(0, elapsed - .6) * 12))
+                    goals = {n: first[n] + (int(math.copysign(bias, errors[n]))
+                             if n != 'gripper' and abs(errors[n]) * TICK_DEGREES > self.start_tolerance else 0)
+                             for n in NAMES}
+                    checked_angles(goals, self.cal)
+                    return goals
+                # The preflight call uses elapsed=0 and cannot start the motion clock.
+                if elapsed > 0:
+                    if self.aligned_since is None:
+                        self.aligned_since = elapsed
+                    if elapsed - self.aligned_since >= self.alignment_hold_seconds:
+                        self.motion_origin = elapsed
+            elapsed = max(0, elapsed - (self.motion_origin if self.motion_origin is not None else elapsed))
+        if self.follow_feedback:
+            lag = max(abs(previous[n] - actual[n]) for n in NAMES[:-1]) * TICK_DEGREES
+            pace = max(self.minimum_feedback_pace, (8. / max(8., lag)) ** 3)
+            self.feedback_time += max(0., elapsed - self.last_elapsed) * pace
+            self.last_elapsed = elapsed
+            elapsed = self.feedback_time
         position = min(self.times[-1], max(0, elapsed))
         right = min(len(self.times) - 1, bisect.bisect_right(self.times, position))
         left = max(0, right - 1)
@@ -353,10 +470,12 @@ class ReplayTrajectory:
         goals = {n: round(a[n] + weight * (b[n] - a[n])) + self.shift[n] for n in NAMES}
         checked_angles(goals, self.cal)
         self.at_end = elapsed >= self.duration
+        endpoint = self.rows[-1]['follower_raw'] if self.use_recorded_endpoint_feedback else None
         self.settled = self.at_end and all(
-            abs(goals[n] - actual[n]) * TICK_DEGREES <= 3
+            abs((endpoint[n] + self.shift[n] if endpoint is not None else goals[n]) - actual[n])
+            * TICK_DEGREES <= self.endpoint_tolerance
             or (n == 'gripper' and gripper_closing_contact(actual[n], previous[n], goals[n], self.cal))
             for n in NAMES)
-        if self.at_end and not self.settled and elapsed > self.duration + 5:
+        if self.at_end and not self.settled and not self.allow_endpoint_hold and elapsed > self.duration + 5:
             raise TeleopError('回放末端 5 秒内未到位，停止；请检查负载和轨迹。')
         return goals

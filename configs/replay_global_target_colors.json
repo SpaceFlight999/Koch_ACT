@@ -1,0 +1,16 @@
+{
+  "version": 1,
+  "min_area": 650,
+  "max_area_fraction": 0.16,
+  "digit_tile_size": 256,
+  "material": "paper",
+  "perspective_corners": true,
+  "source_config": "现场全局相机 T 区彩纸",
+  "colors": {
+    "yellow": {"name": "黄色", "samples": [{"h": 32, "s": 70, "v": 225, "h_tol": 7, "s_tol": 48, "v_tol": 150}]},
+    "pink": {"name": "粉红色", "samples": [{"h": 168.7, "s": 79, "v": 224, "h_tol": 7, "s_tol": 48, "v_tol": 150}]},
+    "red": {"name": "红色", "samples": [{"h": 173.7, "s": 189, "v": 178, "h_tol": 7, "s_tol": 61.6, "v_tol": 150}]},
+    "blue": {"name": "蓝色", "samples": [{"h": 98, "s": 180, "v": 181, "h_tol": 7, "s_tol": 48, "v_tol": 150}]},
+    "green": {"name": "绿色", "samples": [{"h": 57.5, "s": 139, "v": 157, "h_tol": 7, "s_tol": 48, "v_tol": 150}]}
+  }
+}

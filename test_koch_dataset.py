@@ -159,6 +159,61 @@ class DatasetTests(unittest.TestCase):
         self.assertAlmostEqual(source.duration, .1)
         self.assertAlmostEqual(source.rate, 1)
 
+    def test_automatic_pacing_keeps_advancing_under_position_lag(self):
+        episode = self.episode()
+        def edit(rows):
+            start = rows[0]['command_time']
+            for i, row in enumerate(rows):
+                row['command_time'] = start + 2 * i
+                row['goal_raw']['elbow_flex'] += 100 * i
+        self.rewrite_rows(episode, edit)
+        source = data.ReplayTrajectory(episode, self.cal)
+        source.follow_feedback = True
+        source(0., self.actual, self.actual)
+        lagging_goal = dict(self.actual, elbow_flex=self.actual['elbow_flex'] + 180)
+        for elapsed in range(1, 5):
+            source(elapsed, self.actual, lagging_goal)
+        self.assertGreater(source.feedback_time, 0.)
+        self.assertLess(source.feedback_time, 1.)
+        paced_time = source.feedback_time
+        source(4.5, self.actual, self.actual)
+        self.assertAlmostEqual(source.feedback_time, paced_time + .5)
+
+    def test_legacy_chain_aligns_before_replay_and_uses_recorded_rest_feedback(self):
+        episode = self.episode()
+        def edit(rows):
+            rows[-1]['follower_raw']['shoulder_lift'] += 60
+        self.rewrite_rows(episode, edit)
+        source = data.ReplayTrajectory(episode, self.cal)
+        from koch_autonomy.replay_auto import configure_legacy_alignment
+        configure_legacy_alignment(source)
+        source(0., self.actual, self.actual)
+        source(.04, self.actual, self.actual)
+        self.assertIsNone(source.motion_origin)
+        source(.18, self.actual, self.actual)
+        self.assertEqual(source.motion_origin, .18)
+        rest = dict(source.rows[-1]['follower_raw'])
+        goal = source(.18 + source.duration + .01, rest, self.actual)
+        self.assertEqual(goal['shoulder_lift'], source.rows[-1]['goal_raw']['shoulder_lift'])
+        self.assertTrue(source.settled)
+
+    def test_legacy_replay_ramps_from_previous_goal_and_waits_for_feedback(self):
+        from koch_autonomy.replay_auto import configure_legacy_alignment
+
+        source = configure_legacy_alignment(data.ReplayTrajectory(self.episode(), self.cal))
+        prior = dict(self.actual, wrist_roll=2128)
+        self.assertEqual(source(0., prior, prior), prior)
+        self.assertEqual(source(.01, prior, prior), prior)
+        halfway = source(.30, prior, prior)
+        self.assertLess(halfway['wrist_roll'], prior['wrist_roll'])
+        self.assertGreater(halfway['wrist_roll'], self.actual['wrist_roll'])
+        source(.65, dict(self.actual, wrist_roll=2078), halfway)
+        self.assertIsNone(source.aligned_since)
+        source(.72, self.actual, self.actual)
+        self.assertIsNone(source.motion_origin)
+        source(.85, self.actual, self.actual)
+        self.assertEqual(source.motion_origin, .85)
+
     def test_one_short_interval_does_not_slow_the_whole_recording(self):
         episode = self.episode()
         def edit(rows):
