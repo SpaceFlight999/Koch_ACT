@@ -186,8 +186,14 @@ class VisionTests(unittest.TestCase):
                 cell.update(number=str(i+1), number_score=.99, confirmed=True)
             return {**base, 'complete': True}, oriented, []
 
-        with patch.object(reader.reader, 'read_numbers', side_effect=numbers):
-            report, _ = reader.read(np.ascontiguousarray(np.rot90(frame)))
+        raw = np.ascontiguousarray(np.rot90(frame))
+        source_region = (np.float32([[342, 612], [438, 612], [438, 708], [342, 708]])
+                         / raw.shape[1::-1]).tolist()
+        with patch.object(reader.reader, 'read_numbers', side_effect=numbers), \
+                patch.object(reader.reader, 'read_blocks', wraps=reader.reader.read_blocks) as detect:
+            report, _ = reader.read(raw, excluded_source_region=source_region)
+        self.assertEqual(len(reader.reader.read_blocks(detect.call_args.args[0], draw=False)[0]['cells']), 4)
+        np.testing.assert_array_equal(raw, np.rot90(frame))
         self.assertTrue(report['complete'], report)
         self.assertEqual([report['targets'][t]['color'] for t in ('T1', 'T2', 'T3', 'T4')],
                          ['red', 'blue', 'yellow', 'green'])

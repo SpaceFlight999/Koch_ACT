@@ -423,13 +423,24 @@ class AutoReplayTests(unittest.TestCase):
                 pose = alignment.measure(frame)
                 self.assertTrue(pose['source_ready'])
                 self.assertFalse(pose['aligned'])
-                report = reader.read(alignment.register_source(frame, pose))
+                report = reader.read(alignment.register_source(frame, pose), registered=True)
                 self.assertTrue(report['complete'])
                 self.assertEqual(report['inventory'], expected)
 
     @needs_alignment_reference
+    def test_holder_registration_maps_720p_to_reference_coordinates(self):
+        alignment = CameraAlignment(FIELD_PROFILE)
+        frame = cv2.resize(alignment.reference, (1280, 720), interpolation=cv2.INTER_AREA)
+        report = alignment.measure(frame)
+        self.assertTrue(report['source_ready'])
+        self.assertEqual(report['camera_frame_size'], [1280, 720])
+        self.assertEqual(alignment.register_source(frame, report).shape, alignment.reference.shape)
+        region = np.asarray(report['source_region_normalized'])
+        self.assertTrue(((region > 0) & (region < 1)).all())
+
+    @needs_alignment_reference
     def test_rear_block_does_not_count_as_the_upper_layer_of_an_empty_front_slot(self):
-        from koch_autonomy.vision import load_stack_reader
+        from koch_autonomy.vision import SourceReader, load_stack_reader
         path = FIELD_ROOT / 'outputs/koch_replay_auto/20261123_170532_735971_recovery_check/source-after-stop-raw.png'
         if not path.is_file():
             self.skipTest('需要前排空托座与后排方块投影重叠的现场原图')
@@ -437,10 +448,14 @@ class AutoReplayTests(unittest.TestCase):
         frame = read_image(path)
         registered = alignment.register_source(frame, alignment.measure(frame))
         reader = load_stack_reader(FIELD_ROOT / 'configs/autonomy_source.json', 'source')
-        self.assertIn('S2_L2', reader.read(registered)['unknown'])
-        report = reader.read(registered, registered=True)
-        self.assertTrue(report['complete'])
-        self.assertEqual(report['inventory'], {'S1': ['blue', 'red'], 'S2': [], 'S3': ['red'], 'S4': ['blue']})
+        fixed = SourceReader({**reader.config, 'layer_search_offsets': None}, reader.colors)
+        self.assertIn('S2_L2', fixed.read(registered)['unknown'])
+        self.assertEqual(fixed.read(registered, registered=True)['inventory'],
+                         {'S1': ['blue', 'red'], 'S2': [], 'S3': ['red'], 'S4': ['blue']})
+        if reader.windows:
+            report = reader.read(registered, registered=True)
+            self.assertFalse(report['complete'])
+            self.assertIn('S2 上层有信号但下层为空', ' '.join(report['issues']))
 
 
 if __name__ == '__main__':

@@ -7,7 +7,7 @@ import time
 import cv2
 import numpy as np
 
-from camera_vision import classify_sample, read_image
+from camera_vision import classify_sample, hsv_lookup, read_image
 from grid_reader.core import GridReader, annotate, warp_quad
 from handwritten_digits.camera import orient
 from koch_project_paths import resolve_config_reference
@@ -33,17 +33,39 @@ def corner_order(cells):
     return order
 
 
+def global_board_order(group):
+    centers = np.float32([c['center_px'] for c in group])
+    hull = cv2.convexHull(centers, returnPoints=False).ravel()
+    if len(hull) != 4:
+        return None
+    if cv2.contourArea(centers[hull], oriented=True) < 0:
+        hull = hull[::-1]
+    orientations = []
+    for i in range(4):
+        order = np.roll(hull, -i)
+        a, b, d, c = centers[order]
+        right = (b-a) + (d-c)
+        down = (c-a) + (d-b)
+        if right[0] > 0 and down[1] > 0:
+            score = right[0] / np.linalg.norm(right) + down[1] / np.linalg.norm(down)
+            orientations.append((score, order[[0, 1, 3, 2]].tolist()))
+    orientations.sort(reverse=True)
+    if not orientations or len(orientations) > 1 and orientations[0][0] - orientations[1][0] < .10:
+        return None
+    return orientations[0][1]
+
+
 def find_four_corners(cells):
     """Find a single board-sized group in the rotated full-frame color detections."""
     candidates = []
-    eligible = [i for i, cell in enumerate(cells) if not cell['clipped'] and cell['color']['reliable']]
+    clipped_board = False
+    eligible = [i for i, cell in enumerate(cells) if cell['color']['reliable']]
     for indices in combinations(eligible, 4):
         group = [cells[i] for i in indices]
         if len({cell['color']['key'] for cell in group}) != 4:
             continue
-        try:
-            order = corner_order(group)
-        except ValueError:
+        order = global_board_order(group)
+        if order is None:
             continue
         areas = [cv2.contourArea(np.float32(cell['quad_px'])) for cell in group]
         if min(areas) <= 0 or max(areas) > 2.4 * min(areas):
@@ -56,8 +78,13 @@ def find_four_corners(cells):
         skew = (np.linalg.norm(top - bottom) + np.linalg.norm(left - right)) / size
         if spans.min() < 1. or spans.max() > 3.1 or skew > .75:
             continue
+        if any(cell['clipped'] for cell in group):
+            clipped_board = True
+            continue
         candidates.append((float(skew), [indices[i] for i in order]))
     if not candidates:
+        if clipped_board:
+            raise ValueError('疑似四角任务卡中有卡片贴到画面边缘。请让四张卡完整入画，移开挡住卡片的手或物体。')
         raise ValueError(f'全画面检测到 {len(cells)} 个颜色区域，未定位到完整的四角任务卡。')
     candidates.sort()
     if len(candidates) > 1 and candidates[1][0] - candidates[0][0] < .15:
@@ -83,11 +110,21 @@ class TargetReader:
         self.quantity_rule = quantity_rule
         self.locate_four_corners = locate_four_corners and target is None
 
-    def read(self, frame):
+    def read(self, frame, *, excluded_source_region=None):
+        detection_frame = frame
+        if excluded_source_region is not None:
+            detection_frame = frame.copy()
+            polygon = np.asarray(excluded_source_region, dtype=np.float32)
+            if (polygon.shape != (4, 2) or not np.isfinite(polygon).all()
+                    or not cv2.isContourConvex(polygon)):
+                raise ValueError('S 区屏蔽范围无效，无法开始 T 区读卡。')
+            pixels = np.rint(polygon * frame.shape[1::-1]).astype(np.int32)
+            cv2.fillConvexPoly(detection_frame, pixels, (128, 128, 128))
         candidates = []
         for rotation in ((0, 90, 180, 270) if self.rotation is None else (self.rotation,)):
             rotated = orient(frame, rotation)
-            base, _, debug = self.reader.read_blocks(rotated, draw=False)
+            analysis_frame = rotated if detection_frame is frame else orient(detection_frame, rotation)
+            base, _, debug = self.reader.read_blocks(analysis_frame, draw=False)
             expected = 1 if self.target else 4
             try:
                 if self.locate_four_corners:
@@ -97,7 +134,8 @@ class TargetReader:
                         raise ValueError(f'期望 {expected} 张彩纸，检测到 {len(base["cells"])} 个颜色区域。')
                     order = [0] if self.target else corner_order(base['cells'])
             except ValueError as exc:
-                candidates.append((0., rotation, {'complete': False, 'cells': [], 'status': str(exc)}, rotated))
+                candidates.append((0., rotation, {'complete': False, 'cells': [], 'status': str(exc),
+                                                   'unassigned_cells': base['cells']}, rotated))
                 continue
             base['cells'] = [base['cells'][i] for i in order]
             tiles = [debug[i]['tile'] for i in order]
@@ -152,6 +190,7 @@ class TargetReader:
         report.update(complete=complete, orientation_cw=rotation, orientation_margin=gap,
                       orientation_source='calibrated' if self.rotation is not None else 'digit_evidence',
                       targets=targets if complete else {}, stable=False,
+                      excluded_source_region=excluded_source_region,
                       mode='four_targets' if not self.target else 'single_target',
                       independent_digit_check=self.verifier is not None, quantity_rule=self.quantity_rule,
                       status='目标本帧读取通过，等待连续帧确认。' if complete else '; '.join(issues) or report['status'],
@@ -159,7 +198,8 @@ class TargetReader:
         if issues:
             for cell in report['cells']:
                 cell['confirmed'] = False
-        return report, annotate(rotated, report)
+        annotation = {**report, 'cells': report['unassigned_cells']} if 'unassigned_cells' in report else report
+        return report, annotate(rotated, annotation)
 
 
 def validate_quad(value, frame_shape):
@@ -271,6 +311,112 @@ class StackReader:
 class SourceReader(StackReader):
     def __init__(self, config, color_config):
         super().__init__(config, color_config, 'S')
+        self.windows = config.get('layer_search_offsets')
+        if self.windows is None:
+            return
+        if self.empty is None or set(self.windows) != set(config['faces']):
+            raise ValueError('S 区局部读层需要空托座参考和八个层位搜索范围。')
+        self.color_keys = tuple(color_config['colors'])
+        self.lookup = hsv_lookup(tuple(
+            (i, *(float(sample[key]) for key in ('h', 's', 'v', 'h_tol', 's_tol', 'v_tol')))
+            for i, color in enumerate(self.color_keys)
+            for sample in color_config['colors'][color]['samples']))
+        self.models = {key: np.asarray([s['lab'] for s in entry['samples'] if 'lab' in s])
+                       for key, entry in color_config['colors'].items()}
+        self.layer_windows = []
+        for slot in self.slots:
+            for layer in (1, 2):
+                name = f'{slot}_L{layer}'
+                quad = validate_quad(config['faces'][name], self.empty.shape)
+                x0, y0 = quad.min(axis=0).astype(int)
+                x1, y1 = quad.max(axis=0).astype(int)
+                x0, y0, x1, y1 = (int(v + d) for v, d in zip((x0, y0, x1, y1), self.windows[name], strict=True))
+                if not (0 <= x0 < x1 <= self.empty.shape[1] and 0 <= y0 < y1 <= self.empty.shape[0]):
+                    raise ValueError(f'{name} 搜索范围超出画面。')
+                area = np.s_[y0:y1, x0:x1]
+                window = [[x0, y0], [x1, y0], [x1, y1], [x0, y1]]
+                if any(cv2.intersectConvexConvex(np.float32(window), np.float32(other))[0] > 0
+                       for _, _, _, other, _ in self.layer_windows):
+                    raise ValueError(f'{name} 与其他层位的搜索范围重叠。')
+                self.layer_windows.append((slot, name, area, window, self.to_lab(self.empty[area])))
+
+    @staticmethod
+    def to_lab(tile):
+        smooth = cv2.GaussianBlur(tile, (3, 3), .65)
+        return cv2.cvtColor(smooth.astype(np.float32) / 255, cv2.COLOR_BGR2LAB)
+
+    @staticmethod
+    def largest_component(mask):
+        mask = cv2.morphologyEx(mask.astype(np.uint8), cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
+        _, labels, stats, _ = cv2.connectedComponentsWithStats(mask)
+        if len(stats) == 1:
+            return 0, mask.astype(bool)
+        index = 1 + int(stats[1:, cv2.CC_STAT_AREA].argmax())
+        return int(stats[index, cv2.CC_STAT_AREA]), labels == index
+
+    def read_layer(self, tile, empty_lab):
+        lab = self.to_lab(tile)
+        difference = np.linalg.norm(lab - empty_lab, axis=2)
+        hsv = cv2.cvtColor(tile, cv2.COLOR_BGR2HSV)
+        labels = self.lookup[hsv[:, :, 0], hsv[:, :, 1], hsv[:, :, 2] // 16]
+        changed = difference >= self.config['occupied_min_difference']
+        colored_change = (labels >= 0) & changed & (hsv[:, :, 2] >= 20)
+        scores = []
+        for index, key in enumerate(self.color_keys):
+            area, component = self.largest_component((labels == index) & colored_change)
+            if area < max(45, .13 * difference.size):
+                continue
+            models = self.models[key]
+            distance = float(np.linalg.norm(np.median(lab[component], axis=0) - models, axis=1).min()) if len(models) else 0.
+            if distance <= 35:
+                scores.append((area, key, distance))
+        scores.sort(reverse=True)
+        color, distance = None, None
+        if scores and not self.colors.get('calibration_required'):
+            area, best, distance = scores[0]
+            # A similarly sized second color often means front/rear overlap or
+            # a window crossing the layer seam. Require a clear winner.
+            if len(scores) == 1 or area >= 1.55 * scores[1][0]:
+                color = best
+        changed_area, _ = self.largest_component(difference > self.config['empty_max_difference'])
+        color_trace, _ = self.largest_component(colored_change)
+        low = float(np.quantile(difference, .85))
+        if color is not None:
+            state = 'occupied'
+        elif (low <= self.config['empty_max_difference'] and changed_area <= max(8, .035 * difference.size)
+              and color_trace < 16):
+            state = 'empty'
+        else:
+            state = 'unknown'
+        return {'state': state, 'color': color, 'lab_distance': distance, 'empty_difference': low,
+                'changed_area': changed_area, 'color_trace_area': color_trace,
+                'color_areas': {key: area for area, key, _ in scores}}
+
+    def read(self, frame, *, registered=False):
+        if not self.windows or not registered:
+            return super().read(frame, registered=registered)
+        if list(frame.shape[1::-1]) != self.config['frame_size']:
+            raise ValueError('全局相机分辨率变化，请调整采集分辨率。')
+        if self.config.get('view_markers'):
+            check_fixed_view(frame, self.config['view_markers'])
+        inventory, faces, unknown, issues = {slot: [] for slot in self.slots}, [], [], []
+        for slot, name, area, window, empty_lab in self.layer_windows:
+            face = {'id': name, 'quad_px': window, **self.read_layer(frame[area], empty_lab)}
+            faces.append(face)
+            if face['state'] == 'unknown':
+                unknown.append(name)
+            if face['state'] != 'empty':
+                inventory[slot].append(face['color'])
+            if name.endswith('L2') and faces[-2]['state'] == 'empty' and face['state'] != 'empty':
+                issues.append(f'{slot} 上层有信号但下层为空，请检查遮挡和视角。')
+        return {'complete': not unknown and not issues, 'stable': False, 'inventory': inventory,
+                'faces': faces, 'unknown': unknown, 'issues': issues,
+                'observed_count': sum(f['state'] == 'occupied' for f in faces),
+                'confirmed_empty_count': sum(f['state'] == 'empty' for f in faces),
+                'counts_by_color': dict(Counter(f['color'] for f in faces if f['color'] is not None)),
+                'scope': 'S_registered_layer_search', 'empty_reference_used': True, 'view_pose_verified': True,
+                'status': (f'层位不可确认：{", ".join(unknown + issues)}。请检查遮挡、光线和方块位置。'
+                           if unknown or issues else 'S 区堆栈本帧读取通过。')}
 
 
 class TargetStackReader(StackReader):

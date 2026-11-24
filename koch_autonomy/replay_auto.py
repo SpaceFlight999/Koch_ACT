@@ -295,6 +295,7 @@ def read_live(kind, specification, site_dir, quantity_rule, output, observe, *, 
         camera_name=specification.get('camera_name'), rotation=specification.get('rotation'), target=None,
         plane=file('plane'), roi=specification.get('roi'), seconds=specification.get('seconds', 30),
         quantity_rule=quantity_rule, image=None, show=False, output=output, alignment=file('alignment'),
+        excluded_source_region=specification.get('excluded_source_region'),
     )
     report = observe(args, cancelled=cancelled) if cancelled is not None else observe(args)
     if report.get('complete') is not True or report.get('stable') is not True:
@@ -484,7 +485,13 @@ def run_auto(site_path, preview, observe, *, on_event=ignore_event, cancelled=No
 
     def observe_global_targets(wrist_error=None):
         on_event('observe_global_targets', wrist_error=wrist_error)
-        report = read_live('targets', global_targets, site_dir, quantity_rule,
+        settings = global_targets
+        if (source_before and source.get('camera_name') and source['camera_name'] == global_targets.get('camera_name')
+                and not global_targets.get('roi') and not global_targets.get('plane')):
+            polygon = source_before.get('alignment', {}).get('source_region_normalized')
+            if polygon is not None:
+                settings = {**settings, 'excluded_source_region': polygon}
+        report = read_live('targets', settings, site_dir, quantity_rule,
                            run_dir / 'targets-global.json', observe, cancelled=cancelled)
         report.update(target_camera_mode='global', wrist_scan_error=wrist_error)
         save_json(run_dir / 'targets-global.json', report)
@@ -494,7 +501,7 @@ def run_auto(site_path, preview, observe, *, on_event=ignore_event, cancelled=No
         report = read_live('source', source, site_dir, quantity_rule, run_dir / file, observe, cancelled=cancelled)
         if report.get('empty_reference_used') is not True:
             raise ValueError('S 区未使用同视角空台面参考，无法验证空层。')
-        return report['inventory']
+        return report
 
     @contextmanager
     def open_follower():
@@ -582,9 +589,11 @@ def run_auto(site_path, preview, observe, *, on_event=ignore_event, cancelled=No
         return remaining
 
     check_cancel()
+    source_before = None
     if not scan_only:
         on_event('observe_source')
-        inventory = observe_source('source-before.json')
+        source_before = observe_source('source-before.json')
+        inventory = source_before['inventory']
         validate_inventory(inventory)
         if not any(inventory.values()):
             print('S 区已空，没有执行动作。', flush=True)
@@ -601,7 +610,7 @@ def run_auto(site_path, preview, observe, *, on_event=ignore_event, cancelled=No
         return
     check_cancel()
     on_event('checking_empty')
-    remaining = observe_source('source-after.json')
+    remaining = observe_source('source-after.json')['inventory']
     if remaining != expected:
         raise ValueError(f'路线已全部执行，但 S 区实测库存 {remaining} 和计划剩余 {expected} 不符。')
     print(f'回放已播完，S 区剩余库存与计划一致：{remaining}。请核对 T 区放置。', flush=True)

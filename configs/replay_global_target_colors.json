@@ -4,6 +4,7 @@
   "max_area_fraction": 0.16,
   "digit_tile_size": 256,
   "material": "paper",
+  "fast_lookup": true,
   "perspective_corners": true,
   "source_config": "现场全局相机 T 区彩纸",
   "colors": {

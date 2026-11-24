@@ -23,9 +23,12 @@ SOURCE_WIDE_SEARCH_RADIUS = 135
 SOURCE_GUIDED_SEARCH_RADIUS = 32
 REQUIRED_FRAMES = 4
 STABLE_SECONDS = 1.0
-SOURCE_ADJUST_HINT = '让四个 S 区托座和上层方块完整入画，避免夹爪遮住托座外沿。'
+SOURCE_ADJUST_HINT = '让四个托座的底沿、两侧和最高一层方块完整入画。尽量看清后排下层，避免夹爪遮挡。'
 LOCATOR_SCALE = .4
 HOLDER_SCALES = (.65, .72, .78, .83, .89, .95, 1., 1.06, 1.12, 1.2)
+ROTATED_LOCATOR_SCALE = .25
+HOLDER_ROTATIONS = (-20, -15, -10, -5, 5, 10, 15, 20)
+ROTATED_HOLDER_SCALES = (.72, .82, .92, 1.02, 1.12, 1.22, 1.32)
 
 
 def holder_edges(gray):
@@ -35,34 +38,57 @@ def holder_edges(gray):
     return np.minimum(90, cv2.magnitude(gx, gy))
 
 
-def small_edges(gray):
-    return holder_edges(cv2.resize(gray, None, fx=LOCATOR_SCALE, fy=LOCATOR_SCALE, interpolation=cv2.INTER_AREA))
+def small_edges(gray, scale=LOCATOR_SCALE):
+    return holder_edges(cv2.resize(gray, None, fx=scale, fy=scale, interpolation=cv2.INTER_AREA))
 
 
 def fit_holder_surfaces(reference, current):
-    """Prefer matches spread over the fixture over many overlapping front-edge matches."""
-    candidates = []
-    for indices in combinations(range(len(reference)), 3):
-        points = reference[list(indices)]
-        if cv2.contourArea(points) < 1800:
+    """Fit the fixed fixture, allowing modest shear without extrapolating it from one rear hit."""
+    origin = reference.mean(axis=0)
+    centered = reference - origin
+    x, y = centered.T
+    count = len(x)
+    # Two weak constraints keep the linear part close to a rotation and uniform
+    # scale when matches cluster along the front edge. Rear support can override them.
+    design = np.zeros((count, 2, 6))
+    design[:, 0, :3] = np.c_[x, y, np.ones(count)]
+    design[:, 1, 3:] = design[:, 0, :3]
+    prior = 45 * np.array([[1, 0, 0, 0, -1, 0], [0, 1, 0, 1, 0, 0]])
+
+    def fit(indices):
+        system = np.vstack((design[indices].reshape(-1, 6), prior))
+        values = np.r_[current[indices].ravel(), 0, 0]
+        raw = np.linalg.lstsq(system, values, rcond=None)[0].reshape(2, 3)
+        raw[:, 2] -= raw[:, :2] @ origin
+        return raw
+
+    best = None
+    seen = set()
+    for indices in combinations(range(count), 2):
+        if np.linalg.norm(reference[indices[0]] - reference[indices[1]]) < 100:
             continue
-        matrix = cv2.getAffineTransform(points, current[list(indices)])
-        if np.linalg.norm(matrix[:, :2] - np.eye(2), ord=2) > .24:
+        matrix = fit(list(indices))
+        residual = np.linalg.norm(cv2.transform(reference[None], matrix)[0] - current, axis=1)
+        inliers = residual <= 6
+        signature = tuple(inliers)
+        if inliers.sum() < 5 or signature in seen:
+            continue
+        seen.add(signature)
+        matrix = fit(inliers)
+        linear = matrix[:, :2]
+        if np.linalg.norm(linear - np.eye(2), ord=2) > .24:
             continue
         residual = np.linalg.norm(cv2.transform(reference[None], matrix)[0] - current, axis=1)
-        inliers = residual <= 3
+        inliers = residual <= 5
         support = reference[inliers]
-        if len(support) >= 5 and np.ptp(support[:, 1]) >= 40:
-            area = cv2.contourArea(cv2.convexHull(support))
-            candidates.append((len(support), area, -float(residual[inliers].mean()), inliers))
-    if not candidates:
-        return None, None
-    best_count = max(item[0] for item in candidates)
-    viable = (item for item in candidates if item[0] >= best_count - 2)
-    inliers = max(viable, key=lambda item: (item[1], item[0], item[2]))[3]
-    points = np.c_[reference[inliers], np.ones(inliers.sum())]
-    matrix = np.linalg.lstsq(points, current[inliers], rcond=None)[0].T
-    return matrix, inliers
+        if len(support) < 5 or np.ptp(support[:, 0]) < 125 or np.ptp(support[:, 1]) < 25:
+            continue
+        shear = np.hypot(linear[0, 0]-linear[1, 1], linear[0, 1]+linear[1, 0])
+        area = cv2.contourArea(cv2.convexHull(support))
+        score = np.sum(np.maximum(0, 1 - (residual / 5)**2)) + min(area / 8000, 1) - 14 * shear
+        if best is None or score > best[0]:
+            best = score, matrix, inliers
+    return (None, None) if best is None else best[1:]
 
 
 class CameraAlignment:
@@ -76,13 +102,23 @@ class CameraAlignment:
         self.size = self.reference.shape[1::-1]
         self.tolerance = self.profile.get('max_shift_px', 6)
         self.source_bounds = self.profile.get('source_bounds')
+        self.source_visibility_bounds = self.profile.get('source_visibility_bounds', self.source_bounds)
         stock_path = self.profile.get('stock_reference_image')
         self.uses_holder_surfaces = stock_path is not None
         self.holder_templates = []
         self.holder_locator = []
+        self.common_rotated_locator = []
+        self.rotated_holder_locator = []
         self.source_seed = None
+        self.source_seed_radius = 14
         if self.uses_holder_surfaces and not self.source_bounds:
             raise ValueError('托座轮廓定位需要 S 区画面范围。')
+        if self.source_bounds and self.source_visibility_bounds:
+            x0, y0, x1, y1 = self.source_bounds
+            left, top, right, bottom = self.source_visibility_bounds
+            if not (0 <= x0 <= left < right <= x1 < self.size[0]
+                    and 0 <= y0 <= top < bottom <= y1 < self.size[1]):
+                raise ValueError('S 区可见范围须在参考画面的 S 区预览框内。')
         if not 0 < self.tolerance <= 10:
             raise ValueError('对位容差须在 0–10 像素之间。')
         self.anchors = []
@@ -132,24 +168,55 @@ class CameraAlignment:
         for x0, y0, x1, y1 in regions:
             mask[y0-top:y1-top, x0-left:x1-left] = 1
         for gray in references:
-            template = small_edges(gray[top:bottom, left:right])
+            crop = gray[top:bottom, left:right]
+            template = small_edges(crop)
             for scale in HOLDER_SCALES:
                 scaled = cv2.resize(template, None, fx=scale, fy=scale)
                 scaled_mask = cv2.resize(mask, scaled.shape[::-1], interpolation=cv2.INTER_NEAREST)
-                self.holder_locator.append((scale, scaled, scaled_mask))
+                self.holder_locator.append((np.eye(2) * scale, np.zeros(2), scaled, scaled_mask))
+            self.build_rotated_templates(crop, mask)
 
-    def search_holder_region(self, gray):
-        edges = small_edges(gray)
-        hits = []
-        for scale, template, mask in self.holder_locator:
-            response = cv2.matchTemplate(edges, template, cv2.TM_CCOEFF_NORMED, mask=mask)
-            response[~np.isfinite(response)] = -1
-            _, score, _, corner = cv2.minMaxLoc(response)
-            if score >= .47:
-                hits.append((score, scale, corner))
-        for _, scale, corner in sorted(hits, reverse=True):
-            offset = np.asarray(corner) / LOCATOR_SCALE - scale * self.locator_origin
-            yield np.column_stack((np.eye(2) * scale, offset))
+    def build_rotated_templates(self, crop, mask):
+        small = cv2.resize(crop, None, fx=ROTATED_LOCATOR_SCALE, fy=ROTATED_LOCATOR_SCALE,
+                           interpolation=cv2.INTER_AREA)
+        small_mask = cv2.resize(mask, small.shape[::-1], interpolation=cv2.INTER_NEAREST)
+        h, w = small.shape
+        corners = np.float32([[[0, 0], [w - 1, 0], [w - 1, h - 1], [0, h - 1]]])
+        for angle in HOLDER_ROTATIONS:
+            for scale in ROTATED_HOLDER_SCALES:
+                transform = cv2.getRotationMatrix2D((0, 0), angle, scale)
+                rotated = cv2.transform(corners, transform)[0]
+                origin = np.floor(rotated.min(axis=0))
+                shape = tuple((np.ceil(rotated.max(axis=0)) - origin + 1).astype(int))
+                transform[:, 2] = -origin
+                surface = cv2.warpAffine(small, transform, shape, borderMode=cv2.BORDER_REPLICATE)
+                selected = cv2.warpAffine(small_mask, transform, shape, flags=cv2.INTER_NEAREST)
+                templates = (self.common_rotated_locator if abs(angle) <= 15 and 1.02 <= scale <= 1.12
+                             else self.rotated_holder_locator)
+                templates.append((transform[:, :2], transform[:, 2], holder_edges(surface), selected))
+
+    def search_holder_region(self, gray, *, need_location):
+        groups = ((self.common_rotated_locator, ROTATED_LOCATOR_SCALE, 22),
+                  (self.holder_locator, LOCATOR_SCALE, 24),
+                  (self.rotated_holder_locator, ROTATED_LOCATOR_SCALE, 22)) if need_location else (
+                  (self.holder_locator, LOCATOR_SCALE, 24),)
+        edges_by_scale = {}
+        for templates, scale, radius in groups:
+            if not templates:
+                continue
+            if scale not in edges_by_scale:
+                edges_by_scale[scale] = small_edges(gray, scale)
+            edges = edges_by_scale[scale]
+            hits = []
+            for linear, template_offset, template, mask in templates:
+                response = cv2.matchTemplate(edges, template, cv2.TM_CCOEFF_NORMED, mask=mask)
+                response[~np.isfinite(response)] = -1
+                _, score, _, corner = cv2.minMaxLoc(response)
+                if score >= (.45 if radius == 22 else .47):
+                    offset = (np.asarray(corner) + template_offset) / scale - linear @ self.locator_origin
+                    hits.append((score, np.column_stack((linear, offset))))
+            for _, matrix in sorted(hits, key=lambda match: match[0], reverse=True)[:32]:
+                yield matrix, radius
 
     def refine_holder_region(self, gray, seed, radius):
         rough = cv2.warpAffine(gray, seed, self.size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
@@ -178,11 +245,35 @@ class CameraAlignment:
         return cv2.contourArea(cv2.convexHull(support))
 
     def measure(self, frame):
-        if tuple(frame.shape[1::-1]) != self.size:
-            raise ValueError(f'相机分辨率须为 {self.size[0]}×{self.size[1]}，与参考画面一致。')
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+        width, height = frame.shape[1::-1]
+        if (width, height) != self.size:
+            same_aspect = abs(width / height / (self.size[0] / self.size[1]) - 1) <= .005
+            if not self.uses_holder_surfaces:
+                raise ValueError(f'相机分辨率须为 {self.size[0]}×{self.size[1]}，与参考画面一致。')
+            if not same_aspect or height < 720:
+                raise ValueError(f'当前画面 {width}×{height}。请使用 {self.size[0]}×{self.size[1]}'
+                                 ' 或同宽高比、至少 720 行的画面。')
+            gray = cv2.resize(gray, self.size, interpolation=cv2.INTER_AREA if height > self.size[1] else cv2.INTER_LINEAR)
+        report = self.measure_reference_size(gray)
+        report['camera_frame_size'] = [width, height]
+        report['reference_frame_size'] = list(self.size)
+        if self.source_bounds and report.get('source_ready'):
+            matrix = self.live_transform(frame, report)
+            left, top, right, bottom = self.source_bounds
+            outline = np.float32([[(left, top), (right, top), (right, bottom), (left, bottom)]])
+            polygon = cv2.transform(outline, matrix)[0]
+            if self.profile.get('source_visibility_bounds') and self.source_touches_edge(frame, polygon):
+                self.source_seed = None
+                report.update(aligned=False, source_ready=False, source_transform=None,
+                              source_issue='possible_source_crop')
+            else:
+                report['source_region_normalized'] = (polygon / [width, height]).tolist()
+        return report
+
+    def measure_reference_size(self, gray):
         if self.holder_locator and self.source_seed is not None:
-            matrix, used, readings = self.refine_holder_region(gray, self.source_seed, 14)
+            matrix, used, readings = self.refine_holder_region(gray, self.source_seed, self.source_seed_radius)
             if matrix is not None:
                 return self.source_report(readings, matrix, used)
             self.source_seed = None
@@ -192,6 +283,7 @@ class CameraAlignment:
             search = 55
         readings = self.match_points(gray, search, edges=edges)
         if self.source_bounds:
+            tracking_seed = None
             matrix, used = self.fit_source_fixture(readings)
             if matrix is None:
                 wide = self.match_points(gray, SOURCE_WIDE_SEARCH_RADIUS, edges=edges)
@@ -213,13 +305,19 @@ class CameraAlignment:
                     if self.coverage(guided, refined_used) > self.coverage(readings, used):
                         matrix, used, readings = refined, refined_used, guided
             if self.holder_locator and (matrix is None or np.linalg.norm(matrix[:, :2] - np.eye(2), ord=2) > .14):
-                for seed in self.search_holder_region(gray):
-                    found, found_used, found_readings = self.refine_holder_region(gray, seed, 24)
+                for seed, radius in self.search_holder_region(gray, need_location=matrix is None):
+                    found, found_used, found_readings = self.refine_holder_region(gray, seed, radius)
                     if found is not None:
                         matrix, used, readings = found, found_used, found_readings
+                        # Reuse the search view that actually matched. A second
+                        # warp through the fitted affine can alter narrow edges
+                        # enough to lose them on a strongly tilted fixture.
+                        if radius == 22:
+                            tracking_seed = seed
                         break
             if self.holder_locator:
-                self.source_seed = matrix
+                self.source_seed = matrix if tracking_seed is None else tracking_seed
+                self.source_seed_radius = 14 if tracking_seed is None else 22
         if self.uses_holder_surfaces:
             return self.source_report(readings, matrix, used)
         aligned = all(r['shift_px'] is not None and r['shift_px'] <= self.tolerance for r in readings)
@@ -254,7 +352,12 @@ class CameraAlignment:
             else:
                 px, py = map(int, np.rint(prediction @ [x, y, 1]))
             x0, y0 = max(0, px-reach), max(0, py-reach)
-            area = np.s_[y0:min(height, py+reach+1), x0:min(width, px+reach+1)]
+            x1, y1 = min(width, px+reach+1), min(height, py+reach+1)
+            if x1-x0 < patch.shape[1] or y1-y0 < patch.shape[0]:
+                readings.append({'name': name, 'reference_xy': [x, y], 'current_xy': None,
+                                 'score': None, 'shift_px': None})
+                continue
+            area = np.s_[y0:y1, x0:x1]
             if self.uses_holder_surfaces:
                 edge, empty, stock = self.holder_templates[index]
                 search = (edges if edge else gray)[area]
@@ -290,7 +393,8 @@ class CameraAlignment:
             return None, []
         valid = inliers.ravel().astype(bool)
         support = reference[valid]
-        if (len(support) < minimum or np.ptp(support[:, 0]) < 125 or np.ptp(support[:, 1]) < 40
+        minimum_depth = 25 if self.uses_holder_surfaces else 40
+        if (len(support) < minimum or np.ptp(support[:, 0]) < 125 or np.ptp(support[:, 1]) < minimum_depth
                 or cv2.contourArea(cv2.convexHull(support)) < 2800
                 or np.linalg.norm(matrix[:, :2] - np.eye(2), ord=2) > (.24 if self.uses_holder_surfaces else .16)):
             return None, []
@@ -299,18 +403,40 @@ class CameraAlignment:
         return matrix, [p['name'] for p, good in zip(matches, valid) if good]
 
     def source_visible(self, matrix):
-        left, top, right, bottom = self.source_bounds
+        left, top, right, bottom = self.source_visibility_bounds
         bounds = np.float32([[(left, top), (right, top), (right, bottom), (left, bottom)]])
         visible = cv2.transform(bounds, matrix)[0]
         return ((visible >= 4) & (visible < np.array(self.size) - 4)).all()
 
+    def source_touches_edge(self, frame, corners):
+        """Reject colored material cut off near the projected fixture."""
+        x0, y0 = np.floor(corners.min(axis=0)).astype(int)
+        x1, y1 = np.ceil(corners.max(axis=0)).astype(int)
+        h, w = frame.shape[:2]
+        edge = 4
+        strips = []
+        if x0 <= edge:
+            strips.append(frame[max(0, y0):min(h, y1), :edge])
+        if x1 >= w-edge:
+            strips.append(frame[max(0, y0):min(h, y1), -edge:])
+        if y0 <= edge:
+            strips.append(frame[:edge, max(0, x0):min(w, x1)])
+        if y1 >= h-edge:
+            strips.append(frame[-edge:, max(0, x0):min(w, x1)])
+        for strip in strips:
+            if strip.size:
+                hsv = cv2.cvtColor(strip, cv2.COLOR_BGR2HSV)
+                if np.count_nonzero((hsv[:, :, 1] >= 60) & (hsv[:, :, 2] >= 35)) >= 16:
+                    return True
+        return False
+
     def register_source(self, frame, report):
-        """Compensate small camera shifts for source color sampling."""
+        """Map the current view into the calibrated source image coordinates."""
         if self.source_bounds:
-            matrix = report['source_transform']
-            if matrix is None:
+            if report['source_transform'] is None:
                 return None
-            return cv2.warpAffine(frame, np.array(matrix), self.size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
+            matrix = self.live_transform(frame, report)
+            return cv2.warpAffine(frame, matrix, self.size, flags=cv2.INTER_LINEAR | cv2.WARP_INVERSE_MAP)
         points = report['points']
         if any(p['shift_px'] is None or p['shift_px'] > 24 for p in points):
             return None
@@ -328,6 +454,14 @@ class CameraAlignment:
                 or abs(rotation) > 1 or abs(scale - 1) > .02):
             return None
         return cv2.warpAffine(frame, matrix, self.size)
+
+    def live_transform(self, frame, report):
+        # Pixel centers must follow the same mapping as the normalized gray
+        # frame used to locate the holders.
+        scales = np.asarray(frame.shape[1::-1], dtype=float) / self.size
+        matrix = np.asarray(report['source_transform']) * scales[:, None]
+        matrix[:, 2] += (scales - 1) / 2
+        return matrix
 
 
 def open_alignment(profile_path=DEFAULT_PROFILE, output=None, *, source_config=None):
@@ -385,7 +519,7 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None, *, source_config=N
             frame = cv2.addWeighted(frame, .65, alignment.reference, .35, 0)
         elif view == 'corrected' and report and report['source_ready']:
             frame = alignment.register_source(frame, report)
-            if inventory_report:
+            if inventory_report and 'faces' in inventory_report:
                 frame = mark_source(frame, inventory_report)
         scale = min(canvas.winfo_width() / frame.shape[1], canvas.winfo_height() / frame.shape[0])
         if scale <= .01:
@@ -401,7 +535,12 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None, *, source_config=N
             area = np.float32([[(x0, y0), (x1, y0), (x1, y1), (x0, y1)]])
             fitted = report and report['source_ready']
             if fitted and view == 'live':
-                area = cv2.transform(area, np.array(report['source_transform']))
+                # The live frame is resized above for display. Its original
+                # capture size is available in the alignment report.
+                ratio = np.asarray(report['camera_frame_size']) / alignment.size
+                area = cv2.transform(area, np.array(report['source_transform'])) * ratio
+            elif view == 'live':
+                area *= np.array(last_frame.shape[1::-1] if last_frame is not None else alignment.size) / alignment.size
             coords = [(left + x * scale, top + y * scale) for x, y in area[0]]
             canvas.create_polygon(*coords, fill='', width=2, outline='#97F5B7' if fitted else '#6BEBFF')
             return
@@ -439,7 +578,7 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None, *, source_config=N
         ttk.Button(controls, text='对齐后保存', command=save_frame).pack(side=RIGHT, padx=8)
 
     def tick():
-        nonlocal last_frame, last_report, last_stamp, good_frames, stable_since, ready, inventory_report
+        nonlocal last_frame, last_report, last_stamp, good_frames, stable_since, ready, inventory_report, stable_read
         try:
             status.set(stream.messages.get_nowait())
         except Empty:
@@ -476,7 +615,8 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None, *, source_config=N
                             detail.set('程序已自动补偿机位偏移。')
                     elif matched:
                         status.set('已找到 S 区 · 正在确认层位')
-                        detail.set(inventory_report['status'] if reader else '正在确认画面稳定。')
+                        detail.set(inventory_report['status'] + ' 切到「校正预览」可查看八层识别框。'
+                                   if reader else '正在确认画面稳定。')
                     else:
                         status.set('暂未找到 S 区')
                         detail.set(SOURCE_ADJUST_HINT)
@@ -486,6 +626,7 @@ def open_alignment(profile_path=DEFAULT_PROFILE, output=None, *, source_config=N
                                            else f'{p["name"]} 未找到' for p in last_report['points']))
             except ValueError as error:
                 good_frames, stable_since, ready, last_report, inventory_report = 0, None, False, None, None
+                stable_read = StableRead()
                 status.set(str(error))
         render(last_frame if last_frame is not None else alignment.reference, last_report)
         root.after(80, tick)

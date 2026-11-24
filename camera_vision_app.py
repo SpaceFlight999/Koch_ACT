@@ -16,6 +16,14 @@ from camera_vision import (BASE, DEFAULT_CONFIG, annotate, detect, fit_sample, l
                            make_plane, read_image, save_config, save_result, write_image)
 
 
+def configure_global_capture(capture, size):
+    capture.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    capture.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
+    capture.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
+    capture.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
+    capture.set(cv2.CAP_PROP_FPS, 30)
+
+
 class CameraStream:
     def __init__(self, index, size):
         self.index, self.size = index, size
@@ -32,11 +40,7 @@ class CameraStream:
             cap = cv2.VideoCapture(self.index, cv2.CAP_DSHOW)
             if not cap.isOpened():
                 raise RuntimeError("相机未打开。检查编号、是否被其他程序占用，以及 Windows 相机隐私权限。")
-            cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
-            cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
-            cap.set(cv2.CAP_PROP_FRAME_WIDTH, self.size[0])
-            cap.set(cv2.CAP_PROP_FRAME_HEIGHT, self.size[1])
-            cap.set(cv2.CAP_PROP_FPS, 30)
+            configure_global_capture(cap, self.size)
             self.actual_fps = cap.get(cv2.CAP_PROP_FPS)
             while not self.stop_event.is_set():
                 ok, frame = cap.read()

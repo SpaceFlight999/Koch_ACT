@@ -49,7 +49,9 @@ def camera_observe(args, *, on_view=None, cancelled=None):
             registered = alignment.register_source(frame, aligned)
             if registered is None:
                 marked = frame.copy()
-                hint = (SOURCE_ADJUST_HINT if alignment.source_bounds else
+                hint = ('S 区有颜色区域贴到画面边缘。请留出托座和方块外沿。'
+                        if aligned.get('source_issue') == 'possible_source_crop' else
+                        SOURCE_ADJUST_HINT if alignment.source_bounds else
                         '请打开「全局相机对位」调整支架。')
                 return ({'complete': False, 'stable': False, 'alignment': aligned,
                          'status': f'全局相机暂不能定位 S 区。{hint}'}, marked)
@@ -66,7 +68,10 @@ def camera_observe(args, *, on_view=None, cancelled=None):
                 raise ValueError('校正后 T 区有不可见部分，请调整取景。')
         elif plane and not (visible == 255).all():
             raise ValueError('校正画面有不可见边界，请用 --roi 限定完全可见的 T 区。')
-        result = reader.read(frame, registered=True) if alignment is not None else reader.read(frame)
+        if args.kind == 'targets':
+            result = reader.read(frame, excluded_source_region=getattr(args, 'excluded_source_region', None))
+        else:
+            result = reader.read(frame, registered=alignment is not None)
         report, marked = result if isinstance(result, tuple) else (result, frame)
         if args.kind == 'source':
             marked = mark_source(frame, report)
@@ -106,9 +111,13 @@ def camera_observe(args, *, on_view=None, cancelled=None):
     try:
         if not capture.isOpened():
             raise ValueError(f'无法打开指定相机 {camera_index}。')
-        size = reader.config['frame_size'] if args.kind != 'targets' else [1280, 720]
-        capture.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
-        capture.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
+        if alignment is not None:
+            from camera_vision_app import configure_global_capture
+            configure_global_capture(capture, alignment.size)
+        else:
+            size = reader.config['frame_size'] if args.kind != 'targets' else [1280, 720]
+            capture.set(cv2.CAP_PROP_FRAME_WIDTH, size[0])
+            capture.set(cv2.CAP_PROP_FRAME_HEIGHT, size[1])
         stable = StableRead()
         until = time.monotonic() + args.seconds
         report = {'complete': False, 'stable': False, 'status': '等待画面。'}
