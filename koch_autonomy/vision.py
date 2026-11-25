@@ -7,10 +7,10 @@ import time
 import cv2
 import numpy as np
 
-from camera_vision import classify_sample, hsv_lookup, read_image
-from grid_reader.core import GridReader, annotate, warp_quad
-from handwritten_digits.camera import orient
-from koch_project_paths import resolve_config_reference
+from koch_vision.colors import classify_sample, hsv_lookup, read_image
+from koch_vision.grid_reader.core import GridReader, annotate, warp_quad
+from koch_vision.handwritten_digits.camera import orient
+from koch_robot.paths import resolve_config_reference
 from .planner import SLOTS, TARGETS, validate_targets
 from .reverse import read_json
 

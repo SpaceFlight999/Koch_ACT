@@ -9,14 +9,14 @@ from types import SimpleNamespace
 import math
 import sys
 
-from koch_dataset import (REPLAY_DEFAULT_RATE, REPLAY_DEFAULT_SPEED, REPLAY_START_ALIGNMENT_DEGREES,
+from koch_robot.dataset import (REPLAY_DEFAULT_RATE, REPLAY_DEFAULT_SPEED, REPLAY_START_ALIGNMENT_DEGREES,
                           ReplayTrajectory, read_jsonl)
-from teleoperate_koch import (NAMES, TICK_DEGREES, Teleoperator, connect_bus, keyboard_stop,
+from koch_robot.teleop import (NAMES, TICK_DEGREES, Teleoperator, connect_bus, keyboard_stop,
                               load_calibration, make_bus, stable_positions)
 
 from .planner import SLOTS, TARGETS, validate_inventory, validate_targets
-from .replay_bridge import LAYER_DIRS, RATE, SPEED, motion_plan, read_trajectory, route_episodes
-from .replay_policy import data_and_exclusions, route_folders
+from .replay_bridge import (LAYER_DIRS, RATE, SPEED, data_and_exclusions, motion_plan, read_trajectory,
+                            route_episodes, route_folders)
 from .reverse import ROOT, read_json, save_json
 
 

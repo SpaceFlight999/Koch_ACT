@@ -8,7 +8,7 @@ from .planner import plan_task
 from .reverse import ROOT, prepare, read_json, save_json, train_reference
 from .workflow import commands, simulate
 from . import replay_bridge
-from koch_project_paths import resolve_config_reference
+from koch_robot.paths import resolve_config_reference
 
 
 def load_target_reader(rotation=None, target=None, config_path=None, quantity_rule='parity'):
@@ -21,7 +21,7 @@ def load_target_reader(rotation=None, target=None, config_path=None, quantity_ru
     for label, path in (('纸面数字模型', model), ('纸面颜色标定', colors), ('独立数字复核模型', verifier)):
         if not path.is_file():
             raise ValueError(f'缺少{label}：{path}。请恢复原目录结构或在 --config 中指定实际文件路径。')
-    from handwritten_digits.model import Predictor
+    from koch_vision.handwritten_digits.model import Predictor
     from .vision import TargetReader
     return TargetReader(Predictor(model), read_json(colors), rotation, target,
                         verifier=Predictor(verifier), quantity_rule=quantity_rule,
@@ -30,7 +30,7 @@ def load_target_reader(rotation=None, target=None, config_path=None, quantity_ru
 
 def camera_observe(args, *, on_view=None, cancelled=None):
     import cv2
-    from camera_vision import read_image, write_image
+    from koch_vision.colors import read_image, write_image
     from .vision import StableRead, load_stack_reader, mark_source, rectify_marked_plane
     alignment = None
     if getattr(args, 'alignment', None) is not None:
@@ -99,7 +99,7 @@ def camera_observe(args, *, on_view=None, cancelled=None):
     if args.camera is None and not args.camera_name:
         raise ValueError('实时识别须明确指定 --camera 或 --camera-name，不自动猜设备。')
     if args.camera_name:
-        from grid_reader.cameras import resolve_named_camera
+        from koch_vision.grid_reader.cameras import resolve_named_camera
         camera_index, camera_name = resolve_named_camera(args.camera_name)
     else:
         camera_index, camera_name = args.camera, None
@@ -112,7 +112,7 @@ def camera_observe(args, *, on_view=None, cancelled=None):
         if not capture.isOpened():
             raise ValueError(f'无法打开指定相机 {camera_index}。')
         if alignment is not None:
-            from camera_vision_app import configure_global_capture
+            from koch_vision.color_app import configure_global_capture
             configure_global_capture(capture, alignment.size)
         else:
             size = reader.config['frame_size'] if args.kind != 'targets' else [1280, 720]
@@ -159,7 +159,7 @@ def camera_observe(args, *, on_view=None, cancelled=None):
 
 def calibrate_source(args):
     import cv2
-    from camera_vision import read_image, fit_sample
+    from koch_vision.colors import read_image, fit_sample
     from .planner import SLOTS, TARGETS
     from .vision import SourceReader, TargetStackReader, appearance_difference, warp_quad, marker_centers
     frame = read_image(args.image)
@@ -321,7 +321,7 @@ def main(argv=None):
             save_json(args.output, result)
             print(f'离线绑定 {len(result["moves"])} 次搬运，校验 {result["model_files_checked"]} 个文件；未执行动作。')
         elif args.command == 'cameras':
-            from grid_reader.cameras import video_devices
+            from koch_vision.grid_reader.cameras import video_devices
             print(json.dumps([{'index': i, 'name': name} for i, name in enumerate(video_devices())], ensure_ascii=False, indent=2))
         elif args.command == 'align-camera':
             from .camera_alignment import DEFAULT_PROFILE, open_alignment

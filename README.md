@@ -4,10 +4,24 @@
 
 | 方式 | 输入 | 执行方式 | 入口 |
 | --- | --- | --- | --- |
-| 手动示教与单条回放 | 人工操作主臂，或选择一条已有记录 | 保存或重放关节目标 | `python collect_koch.py` |
-| ACT 搬运 | 实时相机、从臂关节反馈、所选格子和层级 | ACT 预测关节动作，控制器限速并执行 | `python run_koch_skills.py` |
+| 手动示教与单条回放 | 人工操作主臂，或选择一条已有记录 | 保存或重放关节目标 | `python -m koch_robot.collect` |
+| ACT 搬运 | 实时相机、从臂关节反馈、所选格子和层级 | ACT 预测关节动作，控制器限速并执行 | `python -m koch_act_pipeline.run` |
 | 自动轨迹回放 | S 区库存、T 区目标卡、示范库 | 先规划取放，再按次序回放记录 | `python -m koch_autonomy replay-ui --site replay-auto.site.json` |
 | 离线模拟 | 人工给出的库存和任务 JSON | 计算动作顺序和预期库存变化 | `python -m koch_autonomy demo` |
+
+## 目录
+
+| 位置 | 说明 |
+| --- | --- |
+| [koch_autonomy/](koch_autonomy/) | 自动回放面板、S/T 区识别、搬运规划和轨迹校验 |
+| [koch_robot/](koch_robot/) | 机械臂校准、串口控制、示教采集和轨迹格式 |
+| [koch_act_pipeline/](koch_act_pipeline/) | ACT 数据准备、训练、评估、导出和实时推理 |
+| [koch_vision/](koch_vision/) | 相机工具、颜色区块与手写数字识别 |
+| [tests/](tests/) | 离线测试 |
+| [configs/](configs/)、[examples/](examples/) | 示例配置与无需硬件的任务输入 |
+| [third_party/lerobot_act/](third_party/lerobot_act/) | ACT 源码快照、来源和许可证 |
+
+仓库提交源码、配置示例、文档和离线测试。`datasets/`、`outputs/`、机械臂校准、现场配置和模型权重由各环境单独管理，见 [Git 忽略清单](.gitignore)。LeRobot 快照附有 [原始许可证](third_party/lerobot_act/LICENSE)。
 
 ## 运作思路
 
@@ -55,7 +69,7 @@ ACT 即 Action Chunking with Transformers，是一种用示范学习动作序列
 python -m pip install -r requirements.txt
 python -m koch_autonomy plan --input examples/task.example.json --output outputs/plan.json
 python -m koch_autonomy demo
-python -m unittest test_koch_autonomy test_koch_replay_auto test_koch_capture_policy -q
+python -m unittest discover -s tests -t . -q
 ```
 
 原环境版本记录见 [原环境版本.json](原环境版本.json)。运行 ACT 另需安装完整的 LeRobot，旧权重优先用原环境版本核对兼容性。仓库里的 ACT 快照可供阅读。当前相机枚举和实机入口以 Windows 为主。按设备名称枚举相机需要可用的 FFmpeg DirectShow。Tkinter 窗口需要 Python 的 Tk 支持，调用 OpenCV 原生窗口或交互选区时需要支持 HighGUI 的 OpenCV 环境。
@@ -67,10 +81,10 @@ python -m unittest test_koch_autonomy test_koch_replay_auto test_koch_capture_po
 python -m koch_autonomy replay-audit --data datasets
 
 # 使用已有模型包打开 ACT 窗口
-python run_koch_skills.py
+python -m koch_act_pipeline.run
 
 # 查看第一层 S → 第一层 T 的采集进度
-python collect_koch.py --output datasets/koch_st --list
+python -m koch_robot.collect --output datasets/koch_st --list
 
 # 读相机和检查整组路线接缝，不连接从臂
 python -m koch_autonomy replay-auto --site replay-auto.site.json --preview
@@ -88,12 +102,12 @@ python -m koch_autonomy replay-ui --site replay-auto.site.json
 先恢复采集数据、录像或训练缓存，以及原数据筛选清单。合并训练需要 CUDA GPU。下列路径可替换成实际批次目录，运行合并训练前应确认四组的 64 个模型都已导出。
 
 ```powershell
-python train_koch_layers.py --batch outputs/koch_layers/batch_01
-python train_koch_merged.py --batch outputs/koch_layers/batch_01 --output outputs/koch_merged/batch_01
-python visualize_koch_training.py --batch outputs/koch_layers/batch_01
+python -m koch_act_pipeline.train_layers --batch outputs/koch_layers/batch_01
+python -m koch_act_pipeline.train_merged --batch outputs/koch_layers/batch_01 --output outputs/koch_merged/batch_01
+python -m koch_act_pipeline.visualize --batch outputs/koch_layers/batch_01
 ```
 
-主动起步训练会从 `outputs/koch_layers/latest_batch.json` 的 `batch` 和 `outputs/koch_merged/latest_batch.json` 的 `output` 读取前两阶段的目录。迁移已有批次时，连同这两个索引一并恢复。使用上面的新批次目录时，把两个索引分别指向 `./outputs/koch_layers/batch_01` 和 `./outputs/koch_merged/batch_01`，再运行 `python train_koch_active.py --output outputs/koch_active/batch_01`。各阶段在 `queue_state.json` 写入进度与失败原因，训练可视化从这些记录读取状态。
+主动起步训练会从 `outputs/koch_layers/latest_batch.json` 的 `batch` 和 `outputs/koch_merged/latest_batch.json` 的 `output` 读取前两阶段的目录。迁移已有批次时，连同这两个索引一并恢复。使用上面的新批次目录时，把两个索引分别指向 `./outputs/koch_layers/batch_01` 和 `./outputs/koch_merged/batch_01`，再运行 `python -m koch_act_pipeline.train_active --output outputs/koch_active/batch_01`。各阶段在 `queue_state.json` 写入进度与失败原因，训练可视化从这些记录读取状态。
 
 ## 当前解决和待解决的问题
 
@@ -107,18 +121,3 @@ python visualize_koch_training.py --batch outputs/koch_layers/batch_01
 | 识别随设备与光照变化 | 保留分区标定、空台面参考、方向检查和连续帧确认。 | 已有离线样例。新视角、光照和摆场需要重新验证。 |
 | 整段避碰、抓放与放置闭环 | 现阶段有接缝和电机保护，整组执行后确认 S 区是否清空。 | 三维避碰、单步抓放验证、T 区落点与全流程实机成功率仍待补齐。 |
 | 独立复现训练 | 提供数据准备、训练、验证与导出源码。 | 标准四组训练入口仍引用原数据批次的清理清单。用新数据重训前需要准备相同格式的清单，并核对日期筛选规则。 |
-
-## 目录和提交内容
-
-| 位置 | 说明 |
-| --- | --- |
-| [koch_autonomy/](koch_autonomy/) | 视觉、库存规划、自动回放面板、轨迹绑定和模拟 |
-| [koch_skill_runtime.py](koch_skill_runtime.py)、[run_koch_skills.py](run_koch_skills.py) | ACT 加载、实时输入与推理界面 |
-| [collect_koch.py](collect_koch.py)、[koch_dataset.py](koch_dataset.py) | 手动采集、数据格式、单条轨迹回放 |
-| [teleoperate_koch.py](teleoperate_koch.py)、[koch_teleop_bus.py](koch_teleop_bus.py) | 串口控制、反馈检查和扭矩释放 |
-| [train_koch_layers.py](train_koch_layers.py)、[train_koch_merged.py](train_koch_merged.py)、[train_koch_active.py](train_koch_active.py) | 分层训练、合并训练与主动起步训练 |
-| [grid_reader/](grid_reader/)、[handwritten_digits/](handwritten_digits/) | 颜色区域、数字裁切与 CNN 推理 |
-| [configs/](configs/)、[examples/](examples/) | 示例配置与无需硬件的任务输入 |
-| [third_party/lerobot_act/](third_party/lerobot_act/) | ACT 源码快照、来源和许可证 |
-
-仓库提交源码、配置示例、文档和离线测试。`datasets/`、`outputs/`、机械臂校准、现场配置和模型权重应由各环境单独管理，已列入 [Git 忽略清单](.gitignore)。LeRobot 快照保留其 [原始许可证](third_party/lerobot_act/LICENSE)。

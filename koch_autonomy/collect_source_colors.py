@@ -1,6 +1,7 @@
 """Guided capture of real block placements followed by training and held-out evaluation."""
 
 import argparse
+import copy
 from collections import Counter
 from datetime import datetime
 from pathlib import Path
@@ -11,12 +12,10 @@ from uuid import uuid4
 import cv2
 import numpy as np
 
-from camera_vision import COLOR_NAMES, fit_sample, read_image, write_image
-from grid_reader.cameras import resolve_named_camera
+from koch_vision.colors import COLOR_NAMES, fit_sample, read_image, write_image
+from koch_vision.grid_reader.cameras import resolve_named_camera
 from .planner import SLOTS
 from .reverse import ROOT, read_json, save_json
-from .source_color_training import evaluate, fit_palette
-from .source_capture_view import SourceCaptureView
 from .vision import SourceReader, validate_quad, warp_quad
 
 
@@ -35,6 +34,118 @@ OBSERVED_LAYOUTS = {
 SWATCHES = {'yellow': (70, 218, 244), 'red': (85, 90, 236), 'blue': (247, 156, 66),
             'green': (110, 205, 97), 'pink': (196, 158, 243)}
 WINDOW = 'S color collection'
+
+
+class SourceCaptureView:
+    def __init__(self, config, alternate_views):
+        self.detector = cv2.SIFT_create(nfeatures=2000)
+        self.matcher = cv2.BFMatcher()
+        self.views = []
+        for view in [config, *alternate_views]:
+            frame = read_image(view['reference_image'])
+            if list(frame.shape[1::-1]) != config['frame_size'] or set(view['faces']) != set(config['faces']):
+                raise ValueError('采集视角参考与原始标定不兼容。')
+            for quad in view['faces'].values():
+                validate_quad(quad, frame.shape)
+            points = np.float32(list(view['faces'].values()))
+            mask = np.full(frame.shape[:2], 255, np.uint8)
+            h, w = mask.shape
+            start = np.maximum(0, np.floor(points.min(axis=(0, 1))).astype(int) - 76)
+            end = np.minimum([w, h], np.ceil(points.max(axis=(0, 1))).astype(int) + 76)
+            mask[start[1]:end[1], start[0]:end[0]] = 0
+            keypoints, descriptors = self.detector.detectAndCompute(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), mask)
+            if descriptors is None or len(descriptors) < 30:
+                raise ValueError('相机参考图缺少足够固定特征。')
+            self.views.append((view, points, keypoints, descriptors))
+
+    def align(self, frame):
+        keypoints, descriptors = self.detector.detectAndCompute(cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY), None)
+        if descriptors is None or len(descriptors) < 2:
+            raise ValueError('画面缺少可对齐的桌面特征。')
+        candidates = []
+        for view, points, reference_points, reference_descriptors in self.views:
+            pairs = [nearest for nearest, second in self.matcher.knnMatch(reference_descriptors, descriptors, k=2)
+                     if nearest.distance < .69 * second.distance]
+            if len(pairs) < 30:
+                continue
+            p = np.float32([reference_points[match.queryIdx].pt for match in pairs])
+            q = np.float32([keypoints[match.trainIdx].pt for match in pairs])
+            matrix, inliers = cv2.findHomography(p, q, cv2.RANSAC, 2.5)
+            if matrix is None or int(inliers.sum()) < max(26, .45 * len(pairs)):
+                continue
+            projected = cv2.perspectiveTransform(points.reshape(-1, 1, 2), matrix).reshape(points.shape)
+            if not np.isfinite(projected).all():
+                continue
+            norms = np.linalg.norm(projected - points, axis=2)
+            shift = float(np.median(norms))
+            if float(norms.max()) > 24:
+                continue  # A large change in viewpoint needs its own calibrated template.
+            selected = points if float(norms.max()) <= 1.5 else projected
+            try:
+                quads = {face: validate_quad(quad, frame.shape).tolist()
+                         for face, quad in zip(view['faces'], selected)}
+            except ValueError:
+                continue
+            candidates.append((shift, quads, {'reference_image': view['reference_image'],
+                                              'inliers': int(inliers.sum()), 'shift_px': round(shift, 2)}))
+        if not candidates:
+            raise ValueError('画面与任何已标定的视角对不上。采样框错位时请重试对齐。')
+        _, quads, evidence = min(candidates, key=lambda candidate: candidate[0])
+        return quads, evidence
+
+
+def fit_palette(config, base, records, directory):
+    palette = copy.deepcopy(base)
+    palette['calibration_required'] = False
+    coverage = Counter()
+    skipped = []
+    for record in records:
+        path = (directory / record['image']).resolve()
+        frame = read_image(path)
+        if list(frame.shape[1::-1]) != config['frame_size']:
+            raise ValueError(f'照片分辨率与标定不符：{path}')
+        faces = record.get('faces', config['faces'])
+        for face, color in record['labels'].items():
+            if faces is None:
+                skipped.append({'id': record['id'], 'face': face, 'color': color, 'reason': '照片尚未对齐'})
+                continue
+            patch, _ = warp_quad(frame, faces[face], 64)
+            try:
+                profile = fit_sample(patch, min_saturation=palette.get('sample_min_saturation', 45))
+            except ValueError as exc:
+                skipped.append({'id': record['id'], 'face': face, 'color': color, 'reason': str(exc)})
+                continue
+            profile.update(source_image=str(path), source_face=face, source_quad_px=faces[face])
+            palette['colors'][color]['samples'].append(profile)
+            coverage[face, color] += 1
+    return palette, coverage, skipped
+
+
+def evaluate(config, palette, records, directory):
+    reader = SourceReader(config, palette)
+    counts = {'correct': 0, 'wrong': 0, 'unknown': 0}
+    differences = []
+    complete = 0
+    for record in records:
+        path = (directory / record['image']).resolve()
+        if record.get('faces', config['faces']) is None:
+            faces = dict.fromkeys(record['labels'])
+        else:
+            shot_reader = SourceReader({**config, 'faces': record['faces']}, palette) if 'faces' in record else reader
+            result = shot_reader.read(read_image(path))
+            faces = {item['id']: item['color'] for item in result['faces']}
+        passed = True
+        for face, expected in record['labels'].items():
+            color = faces[face]
+            if color == expected:
+                counts['correct'] += 1
+            else:
+                passed = False
+                counts['unknown' if color is None else 'wrong'] += 1
+                differences.append({'id': record['id'], 'face': face, 'expected': expected, 'observed': color})
+        complete += passed
+    return {**counts, 'total': sum(counts.values()), 'complete_layouts': complete,
+            'layout_count': len(records), 'differences': differences}
 
 
 def build_plan(seed, exclude=()):

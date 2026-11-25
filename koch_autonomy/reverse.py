@@ -10,7 +10,7 @@ import re
 from pathlib import Path
 
 import numpy as np
-from koch_project_paths import ROOT, project_path, read_project_json
+from koch_robot.paths import ROOT, project_path, read_project_json
 
 BODY = ('shoulder_pan', 'shoulder_lift', 'elbow_flex', 'wrist_flex', 'wrist_roll')
 TICK_DEGREES = 360 / 4096

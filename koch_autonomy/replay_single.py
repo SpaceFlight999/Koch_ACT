@@ -2,13 +2,12 @@
 from datetime import datetime
 from time import monotonic
 
-from koch_dataset import REPLAY_DEFAULT_RATE, REPLAY_DEFAULT_SPEED
-from teleoperate_koch import NAMES, TICK_DEGREES, Teleoperator, connect_bus, load_calibration, make_bus
+from koch_robot.dataset import REPLAY_DEFAULT_RATE, REPLAY_DEFAULT_SPEED
+from koch_robot.teleop import NAMES, TICK_DEGREES, Teleoperator, connect_bus, load_calibration, make_bus
 
 from .planner import SLOTS, TARGETS
 from .replay_auto import ReplayChain, configure_legacy_alignment, eligible_episodes, gap_degrees
-from .replay_bridge import LAYER_DIRS, read_trajectory
-from .replay_policy import data_and_exclusions
+from .replay_bridge import LAYER_DIRS, data_and_exclusions, read_trajectory
 from .reverse import ROOT, read_json, save_json
 
 

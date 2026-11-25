@@ -1,4 +1,4 @@
-"""Resolve reviewed vision decisions to the project's existing joint Replay."""
+"""Find Replay recordings, manage route exclusions, and verify plans."""
 from collections import defaultdict
 from hashlib import file_digest
 from pathlib import Path
@@ -18,6 +18,40 @@ LAYER_DIRS = {
 RATE, SPEED = .5, 60
 
 
+def data_and_exclusions(site_path, site):
+    data = (site_path.resolve().parent / site.get('data', DATA_ROOT)).resolve()
+    return data, {(data / item).resolve() for item in site.get('excluded_replay_paths', ())}
+
+
+def route_folders(data, pair, route):
+    group = data / LAYER_DIRS[pair]
+    return {(group / name).resolve() for name in (route, route.replace('_', '-'))}
+
+
+def route_is_disabled(site_path, source, target, pair):
+    site = read_json(site_path)
+    data, excluded = data_and_exclusions(site_path, site)
+    return bool(route_folders(data, pair, f'{source}_{target}') & excluded)
+
+
+def toggle_route(site_path, source, target, pair):
+    if source not in SLOTS or target not in TARGETS or pair not in LAYER_DIRS:
+        raise ValueError('请选择有效的 S/T 位置和层位。')
+    site = read_json(site_path)
+    data, excluded = data_and_exclusions(site_path, site)
+    route = f'{source}_{target}'
+    folders = route_folders(data, pair, route)
+    disabled = not bool(folders & excluded)
+    entries = site.get('excluded_replay_paths', [])
+    if disabled:
+        entries = [*entries, (Path(LAYER_DIRS[pair]) / route).as_posix()]
+    else:
+        entries = [item for item in entries if (data / item).resolve() not in folders]
+    site['excluded_replay_paths'] = entries
+    save_json(site_path, site)
+    return disabled
+
+
 def fingerprint(episode):
     result = {}
     for name in ('episode.json', 'joints.jsonl'):
@@ -27,8 +61,8 @@ def fingerprint(episode):
 
 
 def read_trajectory(episode, route, calibration=None, *, rate=RATE, speed=SPEED, observed_body=False):
-    from koch_dataset import ReplayTrajectory
-    from teleoperate_koch import TICK_DEGREES
+    from koch_robot.dataset import ReplayTrajectory
+    from koch_robot.teleop import TICK_DEGREES
 
     meta = read_json(episode / 'episode.json')
     if meta['route'].replace('-', '_') != route or episode.parent.name.replace('-', '_') != route:
@@ -138,7 +172,7 @@ def run_step(root, bound, step, port=None, calibration=None):
         raise ValueError('实机回放须同时提供 --follower-port 和 --follower-calibration。')
     active_cal = None
     if calibration:
-        from teleoperate_koch import load_calibration
+        from koch_robot.teleop import load_calibration
         active_cal = load_calibration(calibration)
     trajectory = read_trajectory(episode, route, active_cal)
     print(f'第 {step}/{len(moves)} 步 {move["color"]} | {move["source"]} 第 {pair[0]} 层 '
@@ -152,7 +186,7 @@ def run_step(root, bound, step, port=None, calibration=None):
         raise ValueError(f'未枚举到从臂串口 {port}。')
     if not sys.stdin.isatty() or not sys.stdout.isatty():
         raise ValueError('实机回放需要交互终端，以便确认起点和按键中止。')
-    from collect_koch import replay
+    from koch_robot.collect import replay
     print('确认当前 S/T 方块与这一步一致。完成后检查抓放和层位，再调用下一步。', flush=True)
     replay(SimpleNamespace(follower_port=port, follower_calibration=calibration, speed=SPEED, replay_rate=RATE), episode)
 

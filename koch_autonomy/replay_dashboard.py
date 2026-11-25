@@ -8,15 +8,15 @@ from time import monotonic
 from tkinter import StringVar, Tk, Toplevel, messagebox, ttk
 from types import SimpleNamespace
 
-from camera_vision_app import CameraStream
-from grid_reader.app import GridApp
-from grid_reader.cameras import resolve_named_camera
-from grid_reader.worker import replace_latest
-from teleoperate_koch import NAMES
+from koch_vision.color_app import CameraStream
+from koch_vision.grid_reader.app import GridApp
+from koch_vision.grid_reader.cameras import resolve_named_camera
+from koch_vision.grid_reader.worker import replace_latest
+from koch_robot.teleop import NAMES
 
 from .replay_advice import color_label, suggest_layouts
 from .replay_auto import run_auto
-from .replay_policy import route_is_disabled, toggle_route
+from .replay_bridge import route_is_disabled, toggle_route
 from .replay_single import run_single, select_episode
 from .reverse import read_json
 

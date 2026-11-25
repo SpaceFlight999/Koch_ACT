@@ -22,7 +22,7 @@ $python = (Resolve-Path -LiteralPath $python).Path
 $module = 'koch_autonomy'
 $arguments = $args
 if ($args.Count -gt 0 -and $args[0] -in @('vision-ui', 'color-ui')) {
-    $module = if ($args[0] -eq 'vision-ui') { 'grid_reader.app' } else { 'camera_vision_app' }
+    $module = if ($args[0] -eq 'vision-ui') { 'koch_vision.grid_reader.app' } else { 'koch_vision.color_app' }
     $arguments = @($args | Select-Object -Skip 1)
 }
 $oldPythonPath = $env:PYTHONPATH

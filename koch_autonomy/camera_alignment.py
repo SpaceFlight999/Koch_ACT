@@ -8,9 +8,9 @@ from time import monotonic
 import cv2
 import numpy as np
 
-from camera_vision import read_image, write_image
-from grid_reader.cameras import resolve_named_camera
-from koch_project_paths import ROOT, resolve_config_reference
+from koch_vision.colors import read_image, write_image
+from koch_vision.grid_reader.cameras import resolve_named_camera
+from koch_robot.paths import ROOT, resolve_config_reference
 
 from .reverse import read_json, save_json
 
@@ -467,7 +467,7 @@ class CameraAlignment:
 def open_alignment(profile_path=DEFAULT_PROFILE, output=None, *, source_config=None):
     from tkinter import BOTH, LEFT, RIGHT, X, Canvas, StringVar, Tk, ttk
     from PIL import Image, ImageTk
-    from camera_vision_app import CameraStream
+    from koch_vision.color_app import CameraStream
     from .vision import StableRead, load_stack_reader, mark_source
 
     alignment = CameraAlignment(profile_path)

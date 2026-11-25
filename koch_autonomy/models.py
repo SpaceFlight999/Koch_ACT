@@ -5,9 +5,9 @@ from .reverse import ROOT, read_json, validate_route_layers
 
 
 def bind_plan(plan, verify_hashes=True):
-    from koch_skill_runtime import ModelPack, Stage, latest_pack_paths
-    from teleoperate_koch import load_calibration
-    from prepare_koch_skills import sha256
+    from koch_act_pipeline.runtime import ModelPack, Stage, latest_pack_paths
+    from koch_robot.teleop import load_calibration
+    from koch_act_pipeline.prepare_skills import sha256
     manifests, _ = latest_pack_paths()
     calibration = load_calibration(ROOT / 'calibration/koch_legacy/follower/my_follower.json')
     selected = (Stage('gripper', '开爪', 'open'), Stage('approach_align', '对齐源位置'),

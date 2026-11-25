@@ -3,12 +3,11 @@ from copy import copy
 from functools import lru_cache
 from itertools import combinations, product
 
-from teleoperate_koch import load_calibration
+from koch_robot.teleop import load_calibration
 
 from .planner import SLOTS, validate_inventory, validate_targets
 from .replay_auto import load_scan, prepare_chain
-from .replay_bridge import read_trajectory
-from .replay_policy import data_and_exclusions
+from .replay_bridge import data_and_exclusions, read_trajectory
 from .reverse import read_json
 
 
